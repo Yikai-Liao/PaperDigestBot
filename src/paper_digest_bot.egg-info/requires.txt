@@ -1,0 +1,4 @@
+taskiq
+loguru
+pytest
+pytest-mock

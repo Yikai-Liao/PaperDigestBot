@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[project]
+name = "paper_digest_bot"
+version = "0.1.0"
+dependencies = [
+    "taskiq",
+    "loguru",
+    "pytest",
+    "pytest-mock",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+pythonpath = "src"  # This fixes the module import error by adding src to the Python path
