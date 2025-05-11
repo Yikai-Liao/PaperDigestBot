@@ -9,6 +9,9 @@ dependencies = [
     "loguru",
     "pytest",
     "pytest-mock",
+    "pytest-asyncio",
+    "python-telegram-bot[all,ext]>=22.0",
+    "toml>=0.10.2",
 ]
 
 [tool.pytest.ini_options]
