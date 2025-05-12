@@ -7,10 +7,19 @@ It handles user interactions, communicates with the Dispatcher via Taskiq, and f
 """
 
 import os
+import sys
 import toml
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ChatMemberHandler
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from loguru import logger
+from pathlib import Path
+
+REPO_DIR = Path(__file__).resolve().parent.parent.parent
+# add the src directory to the Python path
+sys.path.append(str(REPO_DIR))
+
+from src.dispatcher import request_recommendations, process_arxiv_ids, update_settings, record_reaction, broker
 
 # Load configuration from config.toml
 config_path = os.getenv('CONFIG_PATH', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'config', 'config.toml'))
@@ -37,20 +46,11 @@ async def set_bot_commands(bot):
         BotCommand("recommend", "获取论文推荐"),
         BotCommand("digest", "获取指定论文摘要"),
         BotCommand("similar", "查找相似论文"),
-        BotCommand("setting", "配置偏好")
+        BotCommand("setting", "配置偏好"),
+        BotCommand("test_taskiq", "测试 Taskiq")
     ]
     await bot.set_my_commands(commands)
     logger.info("自定义命令菜单已设置")
-
-# Placeholder for Taskiq client to communicate with Dispatcher
-# This will be initialized when Taskiq setup is complete
-taskiq_client = None
-
-def setup_taskiq_client(client):
-    """Set up the Taskiq client for communication with Dispatcher."""
-    global taskiq_client
-    taskiq_client = client
-    logger.info("Taskiq client setup completed for Telegram Bot")
 
 # Markdown to Telegram format conversion utility
 def markdown_to_telegram(md_text):
@@ -84,7 +84,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "请随时发送 Arxiv ID 列表或使用上述命令与我互动！"
     )
     await update.message.reply_text(welcome_message)
-    await update.message.reply_text(welcome_message)
     # Optionally send initial settings or preferences prompt
     await setting(update, context, initial=True)
 
@@ -114,23 +113,30 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Triggers the paper recommendation process and sends recommended paper abstracts to the user.
     """
     logger.info(f"User {update.effective_user.id} requested paper recommendations")
-    await update.message.reply_text("正在获取您的论文推荐，请稍候...")
-    
-    if taskiq_client is None:
-        logger.error("Taskiq client not initialized")
-        await update.message.reply_text("抱歉，系统尚未完全初始化。请稍后再试。")
-        return
+    initial_message = await update.message.reply_text("正在获取您的论文推荐，请稍候...")
     
     try:
         # Request recommendations from Dispatcher via Taskiq
-        recommendations = await taskiq_client.request_recommendations(user_id=update.effective_user.id)
+        recommendations = await request_recommendations.kiq(update.effective_user.id)
+        result = await recommendations.wait_result(timeout=10)
+        recommendations = result.return_value
+        
         if not recommendations:
-            await update.message.reply_text("目前没有推荐的论文。稍后再试或调整您的偏好。")
+            await context.bot.edit_message_text(
+                text="目前没有推荐的论文。稍后再试或调整您的偏好。",
+                chat_id=update.effective_chat.id,
+                message_id=initial_message.message_id
+            )
             return
             
         # Format recommendations for Telegram
         formatted_recommendations = markdown_to_telegram(recommendations)
-        await update.message.reply_text(formatted_recommendations, parse_mode='Markdown')
+        await context.bot.edit_message_text(
+            text=formatted_recommendations,
+            chat_id=update.effective_chat.id,
+            message_id=initial_message.message_id,
+            parse_mode='Markdown'
+        )
     except Exception as e:
         logger.error(f"Error fetching recommendations: {e}")
         await update.message.reply_text("抱歉，获取推荐时出错。请稍后再试。")
@@ -168,23 +174,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("抱歉，我无法理解空消息。请提供有效的 Arxiv ID 列表或使用命令。")
         return
         
-    if taskiq_client is None:
-        logger.error("Taskiq client not initialized")
-        await update.message.reply_text("抱歉，系统尚未完全初始化。请稍后再试。")
-        return
-    
     try:
         # Check if the message contains Arxiv IDs (basic check for now)
         if "arxiv" in user_text.lower() or any(line.strip().isdigit() for line in user_text.split('\n')):
             # Assume it's a list of Arxiv IDs
             await update.message.reply_text("正在处理您的 Arxiv ID 列表，请稍候...")
-            response = await taskiq_client.process_arxiv_ids(user_id=update.effective_user.id, arxiv_ids=user_text)
+            response = await process_arxiv_ids.kiq(update.effective_user.id, user_text)
+            result = await response.wait_result(timeout=10)
+            response = result.return_value
             formatted_response = markdown_to_telegram(response)
             await update.message.reply_text(formatted_response, parse_mode='Markdown')
         elif "频率" in user_text or "领域" in user_text:
             # Assume it's a settings update
             await update.message.reply_text("正在更新您的设置...")
-            response = await taskiq_client.update_settings(user_id=update.effective_user.id, settings_text=user_text)
+            response = await update_settings.kiq(update.effective_user.id, user_text)
+            result = await response.wait_result(timeout=10)
+            response = result.return_value
             await update.message.reply_text(response)
         else:
             # Generic response for unrecognized input
@@ -202,22 +207,18 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reaction = update.message_reaction
     logger.info(f"Received reaction from user {update.effective_user.id}: {reaction.emoji}")
     
-    if taskiq_client is None:
-        logger.error("Taskiq client not initialized")
-        return
-    
     try:
         # Record the reaction with associated message ID and user ID
-        await taskiq_client.record_reaction(
-            user_id=update.effective_user.id,
-            message_id=update.message.message_id,
-            reaction=reaction.emoji
+        await record_reaction.kiq(
+            update.effective_user.id,
+            update.message.message_id,
+            reaction.emoji
         )
     except Exception as e:
         logger.error(f"Error recording reaction: {e}")
 
 # Run method
-def run():
+async def run():
     """
     Entry point to run the Telegram bot.
     Sets up command and message handlers, then starts the bot with polling.
@@ -227,6 +228,9 @@ def run():
     import sys
     
     logger.info("Starting Telegram Bot...")
+    await broker.startup()
+    await application.initialize()
+    await application.start()
     
     # Create a lock file to prevent multiple instances
     lock_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.lock')
@@ -236,7 +240,7 @@ def run():
     except IOError:
         logger.error("Another instance of the bot is already running. Exiting.")
         sys.exit(1)
-    
+        
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("setting", setting))
@@ -254,23 +258,28 @@ def run():
     # Start the bot with polling
     logger.info("Bot started polling for updates")
     # 设置自定义命令菜单
-    import asyncio
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    loop.run_until_complete(set_bot_commands(application.bot))
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await set_bot_commands(application.bot)
+
+    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     
-    # Release the lock when done (though this line might not be reached due to polling)
-    fcntl.lockf(lock_file, fcntl.LOCK_UN)
-    lock_file.close()
-    os.remove(lock_file_path)
+    try:
+        while True:
+            await asyncio.sleep(1)  # 每小时检查一次，保持循环运行
+    except KeyboardInterrupt:
+        logger.info("Shutting down bot...")
+        # 优雅地停止 bot
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+        await broker.shutdown()
+        fcntl.lockf(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
+        os.remove(lock_file_path)
+        logger.info("Bot stopped.")
 
 if __name__ == "__main__":
     """
     Main execution block.
     Runs the Telegram bot if this script is executed directly.
     """
-    run()
+    asyncio.run(run())
