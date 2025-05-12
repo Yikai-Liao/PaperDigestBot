@@ -8,7 +8,7 @@ It handles user interactions, communicates with the Dispatcher via Taskiq, and f
 
 import os
 import toml
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ChatMemberHandler
 from loguru import logger
 
@@ -26,6 +26,21 @@ if os.getenv('TEST_MODE', 'false').lower() != 'true':
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 else:
     application = None  # Will be mocked in tests
+    
+# 设置自定义命令菜单
+from telegram import BotCommand
+
+async def set_bot_commands(bot):
+    """设置 Telegram 机器人的自定义命令菜单"""
+    commands = [
+        BotCommand("start", "启动机器人"),
+        BotCommand("recommend", "获取论文推荐"),
+        BotCommand("digest", "获取指定论文摘要"),
+        BotCommand("similar", "查找相似论文"),
+        BotCommand("setting", "配置偏好")
+    ]
+    await bot.set_my_commands(commands)
+    logger.info("自定义命令菜单已设置")
 
 # Placeholder for Taskiq client to communicate with Dispatcher
 # This will be initialized when Taskiq setup is complete
@@ -69,6 +84,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "请随时发送 Arxiv ID 列表或使用上述命令与我互动！"
     )
     await update.message.reply_text(welcome_message)
+    await update.message.reply_text(welcome_message)
     # Optionally send initial settings or preferences prompt
     await setting(update, context, initial=True)
 
@@ -78,6 +94,8 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=Fa
     Handler for the /setting command or initial settings prompt.
     Allows users to configure bot settings such as notification frequency and recommendation preferences.
     """
+    if initial:
+        settings_message = "首次设置：" + settings_message
     logger.info(f"User {update.effective_user.id} accessed settings")
     settings_message = (
         "您可以配置以下设置：\n"
@@ -203,8 +221,21 @@ def run():
     """
     Entry point to run the Telegram bot.
     Sets up command and message handlers, then starts the bot with polling.
+    Uses a file lock to ensure only one instance is running.
     """
+    import fcntl
+    import sys
+    
     logger.info("Starting Telegram Bot...")
+    
+    # Create a lock file to prevent multiple instances
+    lock_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.lock')
+    lock_file = open(lock_file_path, 'w')
+    try:
+        fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        logger.error("Another instance of the bot is already running. Exiting.")
+        sys.exit(1)
     
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
@@ -222,7 +253,20 @@ def run():
     
     # Start the bot with polling
     logger.info("Bot started polling for updates")
+    # 设置自定义命令菜单
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(set_bot_commands(application.bot))
     application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Release the lock when done (though this line might not be reached due to polling)
+    fcntl.lockf(lock_file, fcntl.LOCK_UN)
+    lock_file.close()
+    os.remove(lock_file_path)
 
 if __name__ == "__main__":
     """

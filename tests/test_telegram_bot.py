@@ -5,7 +5,7 @@ from telegram import Update, User, Message, Chat
 from telegram.ext import ContextTypes
 
 # 导入要测试的模块
-from bot.telegram import start, setting, recommend, digest, similar, handle_message, handle_reaction, markdown_to_telegram
+from bot.tg import start, setting, recommend, digest, similar, handle_message, handle_reaction, markdown_to_telegram
 
 # 固定装置：模拟 Update 对象
 @pytest.fixture
@@ -54,7 +54,7 @@ async def test_setting(mock_update, mock_context):
 async def test_recommend_success(mock_update, mock_context):
     mock_client = MagicMock()
     mock_client.request_recommendations = AsyncMock(return_value="推荐的论文内容")
-    with patch('bot.telegram.taskiq_client', mock_client), \
+    with patch('bot.tg.taskiq_client', mock_client), \
          patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await recommend(mock_update, mock_context)
         mock_reply.assert_called()
@@ -64,7 +64,7 @@ async def test_recommend_success(mock_update, mock_context):
 # 测试 recommend 函数 - 客户端未初始化
 @pytest.mark.asyncio
 async def test_recommend_not_initialized(mock_update, mock_context):
-    with patch('bot.telegram.taskiq_client', None), \
+    with patch('bot.tg.taskiq_client', None), \
          patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await recommend(mock_update, mock_context)
         assert mock_reply.call_count == 2
@@ -93,7 +93,7 @@ async def test_handle_message_arxiv_ids(mock_update, mock_context):
     mock_update.message.text = "arxiv:1234.5678"
     mock_client = MagicMock()
     mock_client.process_arxiv_ids = AsyncMock(return_value="处理后的摘要内容")
-    with patch('bot.telegram.taskiq_client', mock_client), \
+    with patch('bot.tg.taskiq_client', mock_client), \
          patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await handle_message(mock_update, mock_context)
         mock_reply.assert_called()
@@ -106,7 +106,7 @@ async def test_handle_message_settings(mock_update, mock_context):
     mock_update.message.text = "频率:每日;领域:AI,ML"
     mock_client = MagicMock()
     mock_client.update_settings = AsyncMock(return_value="设置已更新")
-    with patch('bot.telegram.taskiq_client', mock_client), \
+    with patch('bot.tg.taskiq_client', mock_client), \
          patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await handle_message(mock_update, mock_context)
         mock_reply.assert_called()
@@ -117,7 +117,7 @@ async def test_handle_message_settings(mock_update, mock_context):
 @pytest.mark.asyncio
 async def test_handle_message_unrecognized(mock_update, mock_context):
     mock_update.message.text = "无法理解的消息"
-    with patch('bot.telegram.taskiq_client', MagicMock()), \
+    with patch('bot.tg.taskiq_client', MagicMock()), \
          patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await handle_message(mock_update, mock_context)
         mock_reply.assert_called_once()
@@ -131,7 +131,7 @@ async def test_handle_reaction(mock_update, mock_context):
     mock_update.message.message_id = 98765
     mock_client = MagicMock()
     mock_client.record_reaction = AsyncMock()
-    with patch('bot.telegram.taskiq_client', mock_client):
+    with patch('bot.tg.taskiq_client', mock_client):
         await handle_reaction(mock_update, mock_context)
         mock_client.record_reaction.assert_called_once_with(
             user_id=12345,
