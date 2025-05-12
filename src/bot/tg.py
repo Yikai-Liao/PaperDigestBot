@@ -104,7 +104,7 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=Fa
         "请回复类似 '频率:每日;领域:AI,ML' 的消息来更新您的设置。"
     )
     if initial:
-        settings_message = "首次设置：" + settings_message
+        settings_message = "首次设置：\n" + settings_message
     await update.message.reply_text(settings_message)
 
 # Handler for recommend command

@@ -37,7 +37,7 @@ def test_markdown_to_telegram():
 async def test_start(mock_update, mock_context):
     with patch.object(mock_update.message, 'reply_text', new=AsyncMock()) as mock_reply:
         await start(mock_update, mock_context)
-        assert mock_reply.call_count == 2
+        assert mock_reply.call_count == 3
         assert "欢迎使用 PaperDigestBot" in mock_reply.call_args_list[0][0][0]
         assert "首次设置" in mock_reply.call_args_list[1][0][0]
 
