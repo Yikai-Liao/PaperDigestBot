@@ -1,7 +1,0 @@
-taskiq
-loguru
-pytest
-pytest-mock
-pytest-asyncio
-python-telegram-bot[all,ext]>=22.0
-toml>=0.10.2
