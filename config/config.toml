@@ -1,1 +1,5 @@
 [telegram]
+token=""
+[pat]
+key = "pat/key.bin"
+db_path = "pat/db.sqlite"

@@ -5,13 +5,19 @@ Module for handling task dispatching and scheduling in the PaperDigestBot system
 This module uses taskiq with AioPika and Redis for task queuing and result storage.
 """
 import asyncio
-from taskiq import InMemoryBroker
+import os
+from src.pat import EncryptedTokenManagerDB
+from src.config import Config
+from loguru import logger
+from src.action import run_workflow
+import polars as pl
+from typing import Optional
 
-broker = InMemoryBroker()
+
+cfg = Config.default()
 
 # Task for handling paper recommendation requests
-@broker.task
-async def request_recommendations(user_id: str) -> str:
+async def request_recommendations(user_id: str) -> Optional[pl.DataFrame]:
     """
     Task to handle paper recommendations for users.
     Returns a default result without actual processing.
@@ -23,39 +29,21 @@ async def request_recommendations(user_id: str) -> str:
         str: Default recommendation response in markdown format
     """
     # Default response in markdown format
-    default_response = """
-# 今日推荐论文
-
-## TinyLLM: Efficient Small Language Models with Transformer Blocks
-
-**作者**: Zhang et al.
-**Arxiv ID**: 2402.12331
-**发布日期**: 2024-02-19
-
-**摘要**: 本文提出了一种高效的小型语言模型架构TinyLLM，通过优化Transformer块的设计，在保持模型质量的同时显著减少了计算资源需求。
-
-**关键点**:
-- 优化了自注意力机制，减少了50%的计算量
-- 在资源受限设备上表现优异
-- 与同等大小的模型相比，性能提升了15-20%
-
-## 深度强化学习在机器人控制中的应用
-
-**作者**: Li et al.
-**Arxiv ID**: 2403.05678
-**发布日期**: 2024-03-10
-
-**摘要**: 本综述探讨了最新的深度强化学习算法如何应用于复杂机器人控制任务，重点关注样本效率和泛化能力。
-
-**关键点**:
-- 对比了多种RL算法在机器人控制中的表现
-- 提出了针对样本效率的新型训练方法
-- 讨论了现实世界部署的挑战与解决方案
-"""
-    return default_response
+    PAT = ""  # 替换为你的 Personal Access Token
+    OWNER = "Yikai-Liao"  # 替换为仓库所有者（用户名或组织名）
+    REPO = "PaperDigestAction"  # 替换为仓库名称
+    WORKFLOW_FILE = "recommend.yml"  # 替换为工作流文件名
+    BRANCH = "main"  # 替换为分支名称
+    INPUTS = {}  # 可选：工作流输入参数
+    ARTIFACT_NAME = "summarized"
+    tmp_dir = await run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME)
+    try:
+        return pl.read_parquet(os.path.join(tmp_dir, "summarized.parquet"))
+    except Exception as e:
+        logger.error(f"读取parquet文件失败: {e}")
+        return None
 
 # Task for processing user-provided Arxiv IDs
-@broker.task
 async def process_arxiv_ids(user_id: str, arxiv_ids: str) -> str:
     """
     Task to process a list of Arxiv IDs provided by a user.
@@ -97,7 +85,6 @@ async def process_arxiv_ids(user_id: str, arxiv_ids: str) -> str:
     return default_response
 
 # Task for updating user settings
-@broker.task
 async def update_settings(user_id: str, settings_text: str) -> str:
     """
     Task to update user settings based on provided text.
@@ -112,8 +99,24 @@ async def update_settings(user_id: str, settings_text: str) -> str:
     """
     return f"设置已更新: {settings_text}"
 
+async def upsert_pat(user_id: str, pat: str) -> bool:
+    """
+    Task to upsert a PAT (Personal Access Token) for a user.
+    
+    Args:
+        user_id (str): The user ID for which the PAT is being upserted
+        pat (str): The Personal Access Token to be stored
+    """
+    # 路径已经在PATConfig中通过validator转换为绝对路径
+    manager = EncryptedTokenManagerDB(db_path=cfg.pat.db_path, key=cfg.pat.key)
+    
+    # 将同步SQLite操作转换为异步操作
+    await asyncio.to_thread(manager.add_token, user_id, pat)
+    
+    logger.debug(f"PAT [{pat[:4]}...] for user {user_id} has been upserted.")
+    return True
+
 # Task for recording user reactions to papers
-@broker.task
 async def record_reaction(user_id: str, message_id: int, reaction: str) -> None:
     """
     Task to record user reactions to papers.

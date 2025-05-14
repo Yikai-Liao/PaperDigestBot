@@ -3,7 +3,7 @@
 """
 Module for handling Telegram bot interactions in the PaperDigestBot system.
 This module implements the Telegram Bot functionality using the python-telegram-bot library.
-It handles user interactions, communicates with the Dispatcher via Taskiq, and formats responses for Telegram.
+It handles user interactions, communicates with the Dispatcher, and formats responses for Telegram.
 """
 
 import os
@@ -19,7 +19,17 @@ REPO_DIR = Path(__file__).resolve().parent.parent.parent
 # add the src directory to the Python path
 sys.path.append(str(REPO_DIR))
 
-from src.dispatcher import request_recommendations, process_arxiv_ids, update_settings, record_reaction, broker
+from src.dispatcher import *
+from src.render import render_summary_tg
+from concurrent.futures import ProcessPoolExecutor
+import atexit
+
+global_pool = ProcessPoolExecutor(max_workers=4)
+atexit.register(global_pool.shutdown)
+
+async def run_in_global_pool(func, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(global_pool, func, *args)
 
 # Load configuration from config.toml
 config_path = os.getenv('CONFIG_PATH', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'config', 'config.toml'))
@@ -47,25 +57,9 @@ async def set_bot_commands(bot):
         BotCommand("digest", "获取指定论文摘要"),
         BotCommand("similar", "查找相似论文"),
         BotCommand("setting", "配置偏好"),
-        BotCommand("test_taskiq", "测试 Taskiq")
     ]
     await bot.set_my_commands(commands)
     logger.info("自定义命令菜单已设置")
-
-# Markdown to Telegram format conversion utility
-def markdown_to_telegram(md_text):
-    """
-    Convert Markdown text to a format compatible with Telegram.
-    This is a basic implementation and can be enhanced based on specific formatting needs.
-    """
-    # Replace Markdown bold (**text**) with Telegram bold (*text*)
-    formatted_text = md_text.replace('**', '*')
-    # Replace Markdown italic (_text_) with Telegram italic (_text_)
-    # Already compatible, no change needed for italic
-    # Replace Markdown links ([text](url)) with Telegram links (text (url))
-    import re
-    formatted_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', formatted_text)
-    return formatted_text
 
 # Handler for start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,14 +87,14 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=Fa
     Handler for the /setting command or initial settings prompt.
     Allows users to configure bot settings such as notification frequency and recommendation preferences.
     """
-    if initial:
-        settings_message = "首次设置：" + settings_message
     logger.info(f"User {update.effective_user.id} accessed settings")
     settings_message = (
         "您可以配置以下设置：\n"
         "1. 通知频率：每日、每周、关闭\n"
-        "2. 推荐偏好：领域（如 AI, ML, Physics 等）\n\n"
-        "请回复类似 '频率:每日;领域:AI,ML' 的消息来更新您的设置。"
+        "2. 推荐偏好：领域（如 AI, ML, Physics 等）\n"
+        "3. GitHub PAT：设置您的个人访问令牌\n\n"
+        "请回复类似 '频率:每日;领域:AI,ML' 的消息来更新您的设置。\n"
+        "要设置 GitHub PAT，请发送 'pat:您的令牌' 消消息。"
     )
     if initial:
         settings_message = "首次设置：\n" + settings_message
@@ -116,27 +110,31 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     initial_message = await update.message.reply_text("正在获取您的论文推荐，请稍候...")
     
     try:
-        # Request recommendations from Dispatcher via Taskiq
-        recommendations = await request_recommendations.kiq(update.effective_user.id)
-        result = await recommendations.wait_result(timeout=10)
-        recommendations = result.return_value
-        
-        if not recommendations:
+        # Request recommendations from Dispatcher
+        recommendations = await request_recommendations(update.effective_user.id)
+        # recommendations = pl.read_parquet("/tmp/paperdigest_ikd74_xi/summarized.parquet")
+        if recommendations is None:
             await context.bot.edit_message_text(
                 text="目前没有推荐的论文。稍后再试或调整您的偏好。",
                 chat_id=update.effective_chat.id,
                 message_id=initial_message.message_id
             )
             return
+        else:
+            await context.bot.edit_message_text(
+                text="为您推荐的论文摘要如下：",
+                chat_id=update.effective_chat.id,
+                message_id=initial_message.message_id
+            )
             
         # Format recommendations for Telegram
-        formatted_recommendations = markdown_to_telegram(recommendations)
-        await context.bot.edit_message_text(
-            text=formatted_recommendations,
-            chat_id=update.effective_chat.id,
-            message_id=initial_message.message_id,
-            parse_mode='Markdown'
-        )
+        recommendations: dict[str, str] = await run_in_global_pool(render_summary_tg, recommendations)
+        logger.debug(f"Formatted recommendations: {recommendations}")
+        tasks = [
+            update.message.reply_text(rec, parse_mode='Markdown')
+            for rec in recommendations.values()
+        ]
+        await asyncio.gather(*tasks, return_exceptions=True)  # 并发执行并捕获异常
     except Exception as e:
         logger.error(f"Error fetching recommendations: {e}")
         await update.message.reply_text("抱歉，获取推荐时出错。请稍后再试。")
@@ -179,18 +177,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "arxiv" in user_text.lower() or any(line.strip().isdigit() for line in user_text.split('\n')):
             # Assume it's a list of Arxiv IDs
             await update.message.reply_text("正在处理您的 Arxiv ID 列表，请稍候...")
-            response = await process_arxiv_ids.kiq(update.effective_user.id, user_text)
-            result = await response.wait_result(timeout=10)
-            response = result.return_value
+            response = await process_arxiv_ids(update.effective_user.id, user_text)
             formatted_response = markdown_to_telegram(response)
             await update.message.reply_text(formatted_response, parse_mode='Markdown')
         elif "频率" in user_text or "领域" in user_text:
             # Assume it's a settings update
             await update.message.reply_text("正在更新您的设置...")
-            response = await update_settings.kiq(update.effective_user.id, user_text)
-            result = await response.wait_result(timeout=10)
-            response = result.return_value
+            response = await update_settings(update.effective_user.id, user_text)
             await update.message.reply_text(response)
+        elif user_text.lower().startswith("pat:"):
+            # Handle PAT token setting            
+            pat_token = user_text.split(":", 1)[1].strip()
+            if pat_token:  # Check if token is not empty
+                await update.message.reply_text("正在设置您的 GitHub PAT...")
+                try:
+                    user_id = str(update.effective_user.id)
+                    await upsert_pat(user_id, pat_token)
+                    await update.message.reply_text("您的 GitHub PAT 已成功设置！")
+                except Exception as e:
+                    logger.error(f"Error setting PAT: {e}")
+                    await update.message.reply_text("设置 PAT 时出错，请稍后再试。")
+            else:
+                await update.message.reply_text("无效的 PAT 令牌。请确保您复制了完整的令牌，格式应为 'pat:您的令牌'。")
         else:
             # Generic response for unrecognized input
             await update.message.reply_text("抱歉，我无法理解您的请求。请提供 Arxiv ID 列表或使用 /recommend, /digest, /similar 命令。")
@@ -209,7 +217,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         # Record the reaction with associated message ID and user ID
-        await record_reaction.kiq(
+        await record_reaction(
             update.effective_user.id,
             update.message.message_id,
             reaction.emoji
@@ -228,10 +236,23 @@ async def run():
     import sys
     
     logger.info("Starting Telegram Bot...")
-    await broker.startup()
-    await application.initialize()
-    await application.start()
     
+    # 确保broker启动前已设置详细日志
+    logger.debug("Broker startup")
+    logger.debug("Broker startup complete")
+    
+    await application.initialize()
+    logger.debug("Application initialized")
+    await application.start()
+    logger.debug("Application started")
+
+
+                
+    # 然后测试实际的任务
+    logger.debug("尝试提交正式 upsert_pat 任务...")
+    a = await upsert_pat("test_user", "test_token")
+
+
     # Create a lock file to prevent multiple instances
     lock_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.lock')
     lock_file = open(lock_file_path, 'w')
@@ -271,7 +292,6 @@ async def run():
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
-        await broker.shutdown()
         fcntl.lockf(lock_file, fcntl.LOCK_UN)
         lock_file.close()
         os.remove(lock_file_path)

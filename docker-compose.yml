@@ -11,30 +11,5 @@ services:
     environment:
       - QDRANT__SERVICE__GRPC_PORT=6334
     restart: unless-stopped
-
-  rabbitmq:
-    image: docker.io/rabbitmq:3.12-management
-    container_name: rabbitmq
-    ports:
-      - "5672:5672"
-      - "15672:15672"
-    volumes:
-      - ./rabbitmq_data:/var/lib/rabbitmq
-    environment:
-      - RABBITMQ_DEFAULT_USER=guest
-      - RABBITMQ_DEFAULT_PASS=guest
-    restart: unless-stopped
-
-  redis:
-    image: docker.io/redis:7.0
-    container_name: redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - ./redis_data:/data
-    restart: unless-stopped
-
 volumes:
   qdrant_data:
-  rabbitmq_data:
-  redis_data:
