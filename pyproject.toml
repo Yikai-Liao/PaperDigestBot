@@ -25,6 +25,12 @@ dependencies = [
     "aiohttp>=3.11.18",
     "polars>=1.29.0",
     "jinja2>=3.1.6",
+    "apscheduler>=3.11.0",
+    "pytz>=2025.2",
+    "sqlalchemy>=2.0.41",
+    "psycopg2-binary>=2.9.10",
+    "dotenv>=0.9.9",
+    "python-dotenv>=1.1.0",
 ]
 
 [tool.pytest.ini_options]

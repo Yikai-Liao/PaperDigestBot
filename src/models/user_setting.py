@@ -1,0 +1,294 @@
+"""
+用户设置模型
+"""
+from typing import Optional, List, Dict, Any, Union
+from sqlalchemy import Column, String, Text, and_, or_, DateTime
+from sqlalchemy.orm import Session, Mapped, mapped_column
+from src.models.base import BaseModel
+from src.db import db
+from datetime import datetime
+from loguru import logger
+
+class UserSetting(BaseModel):
+    """
+    用户设置模型类
+    用于存储用户的个性化设置
+    """
+    __tablename__ = 'user_setting'
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)  # Telegram 用户 ID
+    github_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # GitHub 用户名
+    pat: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # GitHub Personal Access Token
+    repo_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)  # GitHub 仓库名
+    cron: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # Cron 表达式 (UTC)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)  # 创建时间
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)  # 更新时间
+    
+    def __init__(self, **kwargs):
+        """初始化模型实例"""
+        # 确保 id 是字符串类型
+        if 'id' in kwargs:
+            kwargs['id'] = str(kwargs['id'])
+        super().__init__(**kwargs)
+    
+    @classmethod
+    def get_by_user_id(cls, user_id: str) -> Optional['UserSetting']:
+        """
+        根据用户 ID 获取设置
+        
+        Args:
+            user_id: Telegram 用户 ID
+            
+        Returns:
+            Optional[UserSetting]: 用户设置对象或 None
+        """
+        with db.session() as session:
+            return session.query(cls).filter_by(id=str(user_id)).first()
+    
+    @classmethod
+    def create_or_update(cls, user_id: str, **kwargs) -> 'UserSetting':
+        """
+        创建或更新用户设置
+        
+        Args:
+            user_id: Telegram 用户 ID
+            **kwargs: 要更新的字段和值
+            
+        Returns:
+            UserSetting: 更新后的用户设置对象
+        """
+        with db.session() as session:
+            setting = session.query(cls).filter_by(id=str(user_id)).first()
+            if not setting:
+                setting = cls(id=str(user_id))
+            
+            for key, value in kwargs.items():
+                if hasattr(setting, key):
+                    setattr(setting, key, value)
+            
+            session.add(setting)
+            session.commit()
+            return setting
+    
+    def to_dict(self) -> dict:
+        """
+        转换为字典
+        
+        Returns:
+            dict: 包含所有字段的字典
+        """
+        return {
+            'id': self.id,
+            'github_id': self.github_id,
+            'pat': self.pat,
+            'repo_name': self.repo_name,
+            'cron': self.cron, # Added cron
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    @classmethod
+    def get_by_id(cls, user_id: str) -> Optional['UserSetting']:
+        """
+        根据用户 ID 获取设置（与 get_by_user_id 相同）
+        
+        Args:
+            user_id: Telegram 用户 ID
+            
+        Returns:
+            Optional[UserSetting]: 用户设置对象或 None
+        """
+        return cls.get_by_user_id(user_id)
+    
+    @classmethod
+    def get_by_github_id(cls, github_id: str) -> Optional['UserSetting']:
+        """根据 GitHub ID 获取用户设置"""
+        return cls.filter_one(github_id=github_id)
+    
+    @classmethod
+    def get_by_frequency(cls, frequency: str) -> List['UserSetting']:
+        """根据频率获取用户设置列表"""
+        return cls.filter(frequency=frequency)
+    
+    @classmethod
+    def get_by_repo(cls, repo_name: str) -> Optional['UserSetting']:
+        """根据仓库名获取用户设置"""
+        return cls.filter_one(repo_name=repo_name)
+    
+    @classmethod
+    def search_by_repo(cls, repo_pattern: str) -> List['UserSetting']:
+        """根据仓库名模糊搜索用户设置"""
+        return cls.filter_by(repo_name=repo_pattern)
+    
+    @classmethod
+    def get_active_users(cls) -> List['UserSetting']:
+        """获取所有活跃用户（已设置 PAT 的用户）"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.pat.isnot(None)).all()
+    
+    @classmethod
+    def get_users_by_frequency_and_domain(cls, frequency: str, domain: str) -> List['UserSetting']:
+        """获取指定频率和领域的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(
+                and_(
+                    cls.frequency == frequency,
+                    cls.domain.like(f"%{domain}%")
+                )
+            ).all()
+    
+    @classmethod
+    def update_pat(cls, user_id: Union[str, int], pat: str) -> bool:
+        """更新用户的 PAT"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.pat = pat
+                session.commit()
+                return True
+            return False
+    
+    @classmethod
+    def update_domains(cls, user_id: Union[str, int], domains: List[str]) -> bool:
+        """更新用户关注的领域"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.domain = ",".join(domains)
+                session.commit()
+                return True
+            return False
+    
+    @classmethod
+    def update_frequency(cls, user_id: Union[str, int], frequency: str) -> bool:
+        """更新用户的更新频率"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.frequency = frequency
+                session.commit()
+                return True
+            return False
+    
+    @classmethod
+    def get_or_create(cls, user_id: Union[str, int], **kwargs) -> 'UserSetting':
+        """获取或创建用户设置"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if not user:
+                user = cls(id=str(user_id), **kwargs)
+                session.add(user)
+                session.commit()
+            return user
+    
+    @classmethod
+    def bulk_update_domains(cls, user_ids: List[Union[str, int]], domains: List[str]) -> int:
+        """批量更新多个用户的领域"""
+        with db.session() as session:
+            result = session.query(cls).filter(cls.id.in_([str(id) for id in user_ids])).update(
+                {cls.domain: ",".join(domains)},
+                synchronize_session=False
+            )
+            session.commit()
+            return result
+    
+    @classmethod
+    def get_users_without_pat(cls) -> List['UserSetting']:
+        """获取所有未设置 PAT 的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.pat.is_(None)).all()
+    
+    @classmethod
+    def get_users_without_repo(cls) -> List['UserSetting']:
+        """获取所有未设置仓库的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.repo_name.is_(None)).all()
+    
+    @classmethod
+    def get_users_without_frequency(cls) -> List['UserSetting']:
+        """获取所有未设置频率的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.frequency.is_(None)).all()
+    
+    @classmethod
+    def get_users_without_domain(cls) -> List['UserSetting']:
+        """获取所有未设置领域的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.domain.is_(None)).all()
+    
+    @classmethod
+    def get_complete_users(cls) -> List['UserSetting']:
+        """获取所有设置完整的用户（所有字段都已设置）"""
+        with db.session() as session:
+            return session.query(cls).filter(
+                and_(
+                    cls.pat.isnot(None),
+                    cls.repo_name.isnot(None),
+                    cls.frequency.isnot(None),
+                    cls.domain.isnot(None)
+                )
+            ).all()
+    
+    @classmethod
+    def update_timezone(cls, user_id: Union[str, int], timezone: str) -> bool:
+        """更新用户的时区设置"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.timezone = timezone
+                session.commit()
+                return True
+            return False
+            
+    @classmethod
+    def get_users_without_timezone(cls) -> List['UserSetting']:
+        """获取所有未设置时区的用户"""
+        with db.session() as session:
+            return session.query(cls).filter(cls.timezone.is_(None)).all()
+    
+    def is_complete(self) -> bool:
+        """检查用户设置是否完整"""
+        return all([
+            self.pat is not None,
+            self.repo_name is not None,
+            self.frequency is not None,
+            self.domain is not None,
+            self.timezone is not None
+        ])
+    
+    def get_missing_fields(self) -> List[str]:
+        """获取未设置的字段列表"""
+        missing = []
+        if self.pat is None:
+            missing.append('pat')
+        if self.repo_name is None:
+            missing.append('repo_name')
+        if self.frequency is None:
+            missing.append('frequency')
+        if self.domain is None:
+            missing.append('domain')
+        if self.timezone is None:
+            missing.append('timezone')
+        return missing
+    
+    @classmethod
+    def update_github_id(cls, user_id: Union[str, int], github_id: str) -> bool:
+        """更新用户的 GitHub ID"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.github_id = github_id
+                session.commit()
+                return True
+            return False
+            
+    @classmethod
+    def update_repo_name(cls, user_id: Union[str, int], repo_name: str) -> bool:
+        """更新用户的仓库名"""
+        with db.session() as session:
+            user = session.query(cls).filter(cls.id == str(user_id)).first()
+            if user:
+                user.repo_name = repo_name
+                session.commit()
+                return True
+            return False
