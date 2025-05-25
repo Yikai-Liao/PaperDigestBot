@@ -20,16 +20,53 @@ COMMENT ON COLUMN user_setting.updated_at IS '记录更新时间 (UTC)';
 
 -- message_record table (ensure this is also up-to-date if changed, otherwise keep as is)
 CREATE TABLE IF NOT EXISTS message_record (
+    id SERIAL PRIMARY KEY,
     group_id CHAR(32),
-    user_id CHAR(32),
-    message_id BIGINT,
-    arxiv_id TEXT,
-    repo_name TEXT
+    user_id CHAR(32) NOT NULL,
+    message_id BIGINT NOT NULL,
+    arxiv_id TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 COMMENT ON TABLE message_record IS '消息记录表：记录某群组或用户对某篇论文与对应仓库的消息行为';
+COMMENT ON COLUMN message_record.id IS '自增主键ID';
 COMMENT ON COLUMN message_record.group_id IS 'Telegram 群组 ID，支持负号，使用 CHAR 类型存储字符串形式';
 COMMENT ON COLUMN message_record.user_id IS 'Telegram 用户 ID，使用 CHAR 类型存储';
 COMMENT ON COLUMN message_record.message_id IS 'Telegram 消息 ID，对应一次消息记录';
 COMMENT ON COLUMN message_record.arxiv_id IS 'arXiv 论文唯一编号，例如 2305.12345';
 COMMENT ON COLUMN message_record.repo_name IS 'GitHub 仓库名，格式为 username/repo';
+COMMENT ON COLUMN message_record.created_at IS '记录创建时间 (UTC)';
+COMMENT ON COLUMN message_record.updated_at IS '记录更新时间 (UTC)';
+
+-- reaction_record table for storing user reactions to papers
+CREATE TABLE IF NOT EXISTS reaction_record (
+    id SERIAL PRIMARY KEY,
+    group_id CHAR(32),
+    user_id CHAR(32) NOT NULL,
+    message_id BIGINT NOT NULL,
+    arxiv_id TEXT NOT NULL,
+    emoji VARCHAR(10) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+COMMENT ON TABLE reaction_record IS '反应记录表：记录用户对论文消息的反应（点赞、点踩等）';
+COMMENT ON COLUMN reaction_record.id IS '自增主键ID';
+COMMENT ON COLUMN reaction_record.group_id IS 'Telegram 群组 ID，支持负号，使用 CHAR 类型存储字符串形式';
+COMMENT ON COLUMN reaction_record.user_id IS 'Telegram 用户 ID';
+COMMENT ON COLUMN reaction_record.message_id IS 'Telegram 消息 ID';
+COMMENT ON COLUMN reaction_record.arxiv_id IS 'arXiv 论文唯一编号';
+COMMENT ON COLUMN reaction_record.emoji IS '反应表情';
+COMMENT ON COLUMN reaction_record.created_at IS '记录创建时间 (UTC)';
+COMMENT ON COLUMN reaction_record.updated_at IS '记录更新时间 (UTC)';
+
+-- 添加复合索引以提高查询性能
+CREATE INDEX IF NOT EXISTS idx_message_record_context ON message_record (group_id, user_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_message_record_message_id ON message_record (message_id);
+CREATE INDEX IF NOT EXISTS idx_message_record_arxiv_id ON message_record (arxiv_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_record_message_user ON reaction_record (message_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_record_context ON reaction_record (group_id, user_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_record_user ON reaction_record (user_id);
+CREATE INDEX IF NOT EXISTS idx_reaction_record_arxiv_id ON reaction_record (arxiv_id);

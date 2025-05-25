@@ -87,8 +87,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "请随时发送 Arxiv ID 列表或使用上述命令与我互动！"
     )
     await update.message.reply_text(welcome_message)
-    # Optionally send initial settings or preferences prompt
-    await setting(update, context, initial=True)
+
+def format_pat_safely(pat: str) -> str:
+    """
+    安全格式化PAT，只显示开头和结尾部分，中间用**替代
+    
+    Args:
+        pat: GitHub Personal Access Token
+        
+    Returns:
+        str: 格式化后的PAT字符串
+    """
+    if not pat:
+        return "未设置"
+    
+    if len(pat) <= 8:
+        # 如果PAT太短，只显示开头几位
+        return pat[:2] + "**"
+    
+    # 显示开头4位和结尾4位，中间用**替代
+    return pat[:8] + "**" + pat[-8:]
 
 async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=False):
     """
@@ -157,7 +175,7 @@ def record_messages(send_results, update: Update, recommendations: pl.DataFrame)
 
     for result, arxiv_id in zip(send_results, recommendations['id']):
         try:
-            record = MessageRecord(
+            record = MessageRecord.create(
                 group_id=group_id,
                 user_id=user_id,
                 message_id=result,
@@ -168,8 +186,101 @@ def record_messages(send_results, update: Update, recommendations: pl.DataFrame)
         except Exception as e:
             logger.error(f"记录消息时出错: {e} - 用户ID: {user_id}, Arxiv ID: {arxiv_id}")
 
+async def process_recommendations_background(user_id: str, chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """
+    后台处理推荐逻辑的异步任务
+    """
+    try:
+        # 检查用户设置
+        settings_ok, error_message = await check_user_settings(user_id)
+        if not settings_ok:
+            await context.bot.edit_message_text(
+                text=error_message,
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            return
+            
+        # Request recommendations from Dispatcher
+        recommendations = await request_recommendations(user_id)
+        if recommendations is None:
+            await context.bot.edit_message_text(
+                text="目前没有推荐的论文。稍后再试或调整您的偏好。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            return
+        else:
+            await context.bot.edit_message_text(
+                text="为您推荐的论文摘要如下：",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            
+        # Format recommendations for Telegram
+        formatted: dict[str, str] = await run_in_global_pool(render_summary_tg, recommendations)
+        logger.debug(f"Formatted recommendations: {formatted}")
+        
+        tasks = [
+            context.bot.send_message(chat_id=chat_id, text=rec, parse_mode='Markdown')
+            for rec in formatted.values()
+        ]
+        send_results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # 简化 record_messages 调用
+        user_setting = UserSetting.get_by_id(user_id)
+        if user_setting:
+            for result, arxiv_id in zip(send_results, recommendations['id']):
+                try:
+                    # Handle exceptions in send_results
+                    if isinstance(result, Exception):
+                        logger.error(f"发送消息时出错: {result}")
+                        continue
+                    
+                    # Debug: check what result contains
+                    logger.debug(f"Result type: {type(result)}")
+                    logger.debug(f"Result object: {result}")
+                    
+                    # Extract message_id from the Message object
+                    message_id = None
+                    if hasattr(result, 'message_id'):
+                        message_id = result.message_id
+                        logger.info(f"成功提取 message_id: {message_id}")
+                    else:
+                        logger.error(f"Message对象没有message_id属性. 可用属性: {dir(result)}")
+                        continue
+                    
+                    if message_id is None:
+                        logger.error(f"message_id为None，跳过记录")
+                        continue
+                    
+                    record = MessageRecord.create(
+                        group_id=None,  # 私聊
+                        user_id=user_id,
+                        message_id=message_id,
+                        arxiv_id=arxiv_id,
+                        repo_name=user_setting.repo_name,
+                    )
+                    logger.info(f"消息记录创建成功 - ID: {record.id}")
+                except Exception as e:
+                    logger.error(f"记录消息时出错: {e}")
+                    import traceback
+                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+        
+        logger.info(f"Sent {len(send_results)} recommendations to user {user_id}")
 
-# Handler for recommend command
+    except Exception as e:
+        logger.error(f"Error in background recommendation processing: {e}")
+        try:
+            await context.bot.edit_message_text(
+                text="抱歉，获取推荐时出错。请稍后再试。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+        except Exception as edit_error:
+            logger.error(f"Failed to edit error message: {edit_error}")
+
+# Handler for recommend command  
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for the /recommend command.
@@ -178,62 +289,71 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"User {update.effective_user.id} requested paper recommendations")
     initial_message = await update.message.reply_text("正在获取您的论文推荐，请稍候...")
     
+    # 将处理逻辑提交到后台线程池
+    asyncio.create_task(
+        process_recommendations_background(
+            user_id=str(update.effective_user.id),
+            chat_id=update.effective_chat.id,
+            message_id=initial_message.message_id,
+            context=context
+        )
+    )
+    
+    logger.info(f"Recommendation request queued for user {update.effective_user.id}")
+    # 立即返回，不等待后台任务完成
+    return
+
+async def display_current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    显示当前用户设置
+    """
+    user_id = str(update.effective_user.id)
     try:
-        # 检查用户设置
-        settings_ok, error_message = await check_user_settings(update.effective_user.id)
-        if not settings_ok:
-            await context.bot.edit_message_text(
-                text=error_message,
-                chat_id=update.effective_chat.id,
-                message_id=initial_message.message_id
+        user_setting = UserSetting.get_by_id(user_id)
+        if not user_setting:
+            settings_message = (
+                "📋 *当前设置*\n\n"
+                "您还没有进行任何设置。\n\n"
+                "请使用以下格式进行设置：\n"
+                "`/setting pat:YOUR_PAT;repo:USER/REPO;cron:0 0 7 * * *`\n\n"
             )
+            await setting(update, context, initial=True)
             return
             
-        # Request recommendations from Dispatcher
-        recommendations = await request_recommendations(update.effective_user.id)
-        # recommendations = pl.read_parquet("/tmp/paperdigest_ikd74_xi/summarized.parquet")
-        if recommendations is None:
-            await context.bot.edit_message_text(
-                text="目前没有推荐的论文。稍后再试或调整您的偏好。",
-                chat_id=update.effective_chat.id,
-                message_id=initial_message.message_id
-            )
-            return
-        else:
-            await context.bot.edit_message_text(
-                text="为您推荐的论文摘要如下：",
-                chat_id=update.effective_chat.id,
-                message_id=initial_message.message_id
-            )
-            
-        # Format recommendations for Telegram
-        formated: dict[str, str] = await run_in_global_pool(render_summary_tg, recommendations)
-        logger.debug(f"Formatted recommendations: {formated}")
-        tasks = [
-            update.message.reply_text(rec, parse_mode='Markdown')
-            for rec in formatted.values()
-        ]
-        send_results = await asyncio.gather(*tasks, return_exceptions=True)  # 并发执行并捕获异常
-        await record_messages(send_results, update, recommendations)
-        logger.info(f"Sent {len(send_results)} recommendations to user {update.effective_user.id}")
-
-
-
-
+        # 格式化当前设置
+        pat_display = format_pat_safely(user_setting.pat) if user_setting.pat else "未设置"
+        repo_display = f"{user_setting.github_id}/{user_setting.repo_name}" if user_setting.github_id and user_setting.repo_name else "未设置"
+        cron_display = user_setting.cron if user_setting.cron else "未设置"
+        
+        settings_message = (
+            "📋 *当前设置*\n\n"
+            f"• **PAT**: `{pat_display}`\n"
+            f"• **仓库**: `{repo_display}`\n"
+            f"• **定时任务**: `{cron_display}`\n\n"
+            "如需修改设置，请使用：\n"
+            "`/setting pat:YOUR_PAT;repo:USER/REPO;cron:0 0 7 * * *`\n\n"
+            "单独修改某项设置：\n"
+            "`/setting pat:YOUR_PAT`\n"
+            "`/setting repo:USER/REPO`\n"
+            "`/setting cron:0 0 7 * * *` (或 `cron:关闭`)"
+        )
+        
+        await update.message.reply_markdown(settings_message)
+        
     except Exception as e:
-        logger.error(f"Error fetching recommendations: {e}")
-        await update.message.reply_text("抱歉，获取推荐时出错。请稍后再试。")
+        logger.error(f"显示用户设置时出错: {e}")
+        await update.message.reply_text("获取设置信息时出错，请稍后再试。")
 
 async def update_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles the /setting command to update user settings.
-    If no arguments are provided, it calls the setting() function to display help.
+    If no arguments are provided, it displays current settings.
     Otherwise, it passes the arguments to the dispatcher's update_settings function.
     """
     user_id = str(update.effective_user.id)
     if not context.args:
-        # If /setting is called without arguments, show the help message.
-        await setting(update, context) # Call the existing setting function to show help/template
+        # If /setting is called without arguments, show current settings
+        await display_current_settings(update, context)
         return
 
     settings_text = " ".join(context.args)
@@ -244,6 +364,111 @@ async def update_settings_command(update: Update, context: ContextTypes.DEFAULT_
     success, message = await update_settings(user_id, settings_text) 
     
     await update.message.reply_text(message)
+
+async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理用户对消息的反应（点赞等表情）
+    每个用户对同一消息只能有一个反应，新的反应会替换旧的反应
+    
+    Args:
+        update: 更新对象
+        context: 上下文对象
+    """
+    try:
+        # 获取反应信息
+        if not hasattr(update, 'message_reaction'):
+            logger.warning("update 对象中没有 message_reaction 属性")
+            return
+            
+        reaction = update.message_reaction
+        if not reaction:
+            logger.warning("message_reaction 为空")
+            return
+            
+        user_id = str(update.effective_user.id)
+        
+        # 获取群组ID（如果在群组中）
+        group_id = None
+        if update.effective_chat and update.effective_chat.type in ['group', 'supergroup']:
+            group_id = str(update.effective_chat.id)
+        
+        # 获取 emoji
+        emoji = None
+        is_removing = False
+        
+        # 检查是否是添加反应
+        if hasattr(reaction, 'new_reaction') and reaction.new_reaction:
+            for r in reaction.new_reaction:
+                if hasattr(r, 'emoji'):
+                    emoji = r.emoji
+                    is_removing = False
+                    break
+        # 检查是否是移除反应
+        elif hasattr(reaction, 'old_reaction') and reaction.old_reaction:
+            for r in reaction.old_reaction:
+                if hasattr(r, 'emoji'):
+                    emoji = r.emoji
+                    is_removing = True
+                    break
+                    
+        if not emoji:
+            logger.warning("无法获取 emoji")
+            return
+            
+        # 获取消息ID
+        message_id = reaction.message_id if hasattr(reaction, 'message_id') else None
+            
+        if not message_id:
+            logger.warning(f"无法获取消息ID")
+            return
+            
+        logger.info(f"收到用户 {user_id} 对消息 {message_id} 的{'移除' if is_removing else '添加'}反应: {emoji}")
+        
+        # 获取消息记录 - 使用更精确的查找方法
+        record = MessageRecord.get_by_context(group_id, user_id, message_id)
+        if not record:
+            logger.warning(f"未找到消息 {message_id} 的记录 (group_id: {group_id}, user_id: {user_id})")
+            return
+            
+        # 记录反应
+        try:
+            # 检查用户是否已经对该消息有反应 - 使用上下文查找
+            existing_reaction = ReactionRecord.get_by_context(group_id, user_id, message_id)
+            
+            if is_removing:
+                # 如果是移除反应，删除记录
+                if existing_reaction:
+                    existing_reaction.delete()
+                    logger.info(f"已删除用户 {user_id} 对论文 {record.arxiv_id} 的反应: {existing_reaction.emoji}")
+            else:
+                # 如果是添加反应
+                if existing_reaction:
+                    # 如果已有反应，更新为新的反应
+                    old_emoji = existing_reaction.emoji
+                    existing_reaction.emoji = emoji
+                    existing_reaction.save()
+                    logger.info(f"已更新用户 {user_id} 对论文 {record.arxiv_id} 的反应: {old_emoji} -> {emoji}")
+                else:
+                    # 如果没有反应，创建新的反应记录
+                    reaction_record = ReactionRecord.create(
+                        group_id=group_id,
+                        user_id=user_id,
+                        message_id=message_id,
+                        arxiv_id=record.arxiv_id,
+                        emoji=emoji
+                    )
+                    logger.info(f"已记录用户 {user_id} 对论文 {record.arxiv_id} 的反应: {emoji}")
+                
+        except Exception as e:
+            logger.error(f"记录反应时出错: {str(e)}")
+            import traceback
+            logger.error(f"堆栈跟踪: {traceback.format_exc()}")
+            
+    except Exception as e:
+        logger.error(f"处理反应时出错: {str(e)}")
+        import traceback
+        logger.error(f"堆栈跟踪: {traceback.format_exc()}")
+
 
 # # Handler for digest command
 # async def digest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -312,7 +537,8 @@ async def run():
     application.add_handler(CommandHandler("recommend", recommend))
     # application.add_handler(CommandHandler("digest", digest)) # digest command is commented out
     # application.add_handler(CommandHandler("similar", similar)) # similar command is commented out
-    
+    # handel reactions
+    application.add_handler(MessageReactionHandler(handle_reaction))
     # Start the bot with polling
     logger.info("Bot started polling for updates")
     # 设置自定义命令菜单

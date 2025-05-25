@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Integer
-from sqlalchemy.orm import Mapped, mapped_column
-from .base import BaseModel
+from sqlalchemy import BigInteger, String, Text, Integer, DateTime
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase
 from src.db import db
+from .base import BaseModel
 
 class MessageRecord(BaseModel):
     """
@@ -13,12 +13,13 @@ class MessageRecord(BaseModel):
     __tablename__ = 'message_record'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)  # 自增主键
-    group_id: Mapped[Optional[str]] = mapped_column(nullable=True)  # Telegram 群组 ID
-    user_id: Mapped[str] = mapped_column()  # Telegram 用户 ID
-    message_id: Mapped[int] = mapped_column()  # Telegram 消息 ID
-    arxiv_id: Mapped[str] = mapped_column()  # arXiv 论文 ID
-    repo_name: Mapped[str] = mapped_column()  # GitHub 仓库名
-    created_at: Mapped[datetime] = mapped_column(default=datetime.now)  # 记录创建时间
+    group_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # Telegram 群组 ID
+    user_id: Mapped[str] = mapped_column(String(32), nullable=False)  # Telegram 用户 ID
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)  # Telegram 消息 ID
+    arxiv_id: Mapped[str] = mapped_column(Text, nullable=False)  # arXiv 论文 ID
+    repo_name: Mapped[str] = mapped_column(Text, nullable=False)  # GitHub 仓库名
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)  # 创建时间
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)  # 更新时间
     
     @classmethod
     def create(cls, group_id: Optional[str], user_id: str, message_id: int, 
@@ -32,8 +33,7 @@ class MessageRecord(BaseModel):
             message_id: Telegram 消息 ID
             arxiv_id: arXiv 论文 ID
             repo_name: GitHub 仓库名
-            
-        Returns:
+              Returns:
             MessageRecord: 新创建的消息记录对象
         """
         record = cls(
@@ -43,6 +43,7 @@ class MessageRecord(BaseModel):
             arxiv_id=arxiv_id,
             repo_name=repo_name
         )
+        # Save to database
         record.save()
         return record
     
@@ -59,6 +60,27 @@ class MessageRecord(BaseModel):
         """
         with db.session() as session:
             return session.query(cls).filter(cls.message_id == message_id).first()
+    
+    @classmethod
+    def get_by_context(cls, group_id: Optional[str], user_id: str, message_id: int) -> Optional['MessageRecord']:
+        """
+        根据群组ID、用户ID和消息ID组合获取记录
+        这是更精确的查找方法，因为message_id在不同群组中可能重复
+        
+        Args:
+            group_id: Telegram 群组 ID，私聊时为 None
+            user_id: Telegram 用户 ID  
+            message_id: Telegram 消息 ID
+            
+        Returns:
+            Optional[MessageRecord]: 找到的记录或 None
+        """
+        with db.session() as session:
+            return session.query(cls).filter(
+                cls.group_id == group_id,
+                cls.user_id == user_id,
+                cls.message_id == message_id
+            ).first()
     
     @classmethod
     def get_by_arxiv_id(cls, arxiv_id: str) -> list['MessageRecord']:
@@ -100,4 +122,4 @@ class MessageRecord(BaseModel):
             list[MessageRecord]: 群组的消息记录列表
         """
         with db.session() as session:
-            return session.query(cls).filter(cls.group_id == group_id).all() 
+            return session.query(cls).filter(cls.group_id == group_id).all()

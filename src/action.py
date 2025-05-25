@@ -2,10 +2,11 @@ import aiohttp
 import asyncio
 import os
 from datetime import datetime, timedelta, timezone
-import uuid
 import zipfile
 import io
 import tempfile
+from loguru import logger
+import shutil
 
 async def trigger_workflow(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, workflow_file: str, branch: str, inputs: dict = None):
     """
@@ -21,11 +22,11 @@ async def trigger_workflow(session: aiohttp.ClientSession, pat: str, owner: str,
 
     async with session.post(url, headers=headers, json=payload) as response:
         if response.status == 204:
-            print(f"成功触发工作流: {workflow_file}")
+            logger.info(f"成功触发工作流: {workflow_file}")
             return True
         else:
             error_text = await response.text()
-            print(f"触发工作流失败，状态码: {response.status}，错误: {error_text}")
+            logger.error(f"触发工作流失败，状态码: {response.status}，错误: {error_text}")
             return False
 
 async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, workflow_file: str, branch: str, trigger_time: datetime, max_attempts: int = 10, poll_interval: int = 2):
@@ -49,17 +50,17 @@ async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, o
                         and run["head_branch"] == branch
                         and datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) >= trigger_time
                     ):
-                        print(f"找到触发的运行 ID: {run['id']}")
+                        logger.info(f"找到触发的运行 ID: {run['id']}")
                         return run
-                print(f"尝试 {attempt + 1}/{max_attempts} 未找到匹配的运行，正在重试...")
+                logger.info(f"尝试 {attempt + 1}/{max_attempts} 未找到匹配的运行，正在重试...")
                 await asyncio.sleep(poll_interval)
             else:
                 error_text = await response.text()
-                print(f"获取运行列表失败，状态码: {response.status}，错误: {error_text}")
+                logger.error(f"获取运行列表失败，状态码: {response.status}，错误: {error_text}")
                 return None
         await asyncio.sleep(poll_interval)
     
-    print("未找到匹配的工作流运行，可能是触发延迟或配置错误")
+    logger.warning("未找到匹配的工作流运行，可能是触发延迟或配置错误")
     return None
 
 async def wait_for_workflow_completion(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, run_id: int, poll_interval: int = 20):
@@ -79,18 +80,18 @@ async def wait_for_workflow_completion(session: aiohttp.ClientSession, pat: str,
                 run = await response.json()
                 status = run["status"]
                 conclusion = run["conclusion"]
-                print(f"工作流状态: {status}, 结论: {conclusion}")
+                logger.info(f"工作流状态: {status}, 结论: {conclusion}")
                 if status == "completed":
                     if conclusion == "success":
-                        print("工作流成功完成")
+                        logger.info("工作流成功完成")
                         return True
                     else:
-                        print(f"工作流失败，结论: {conclusion}")
+                        logger.error(f"工作流失败，结论: {conclusion}")
                         return False
                 await asyncio.sleep(poll_interval)
             else:
                 error_text = await response.text()
-                print(f"检查工作流状态失败，状态码: {response.status}，错误: {error_text}")
+                logger.error(f"检查工作流状态失败，状态码: {response.status}，错误: {error_text}")
                 return False
 
 async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, run_id: int, artifact_name: str, output_dir: str = None):
@@ -135,20 +136,20 @@ async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str
                             try:
                                 with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
                                     zip_ref.extractall(output_dir)
-                                print(f"成功下载并解压 artifact: {artifact_name} 到 {output_dir}")
+                                logger.info(f"成功下载并解压 artifact: {artifact_name} 到 {output_dir}")
                                 return output_dir
                             except Exception as e:
-                                print(f"解压artifact失败: {e}")
+                                logger.error(f"解压artifact失败: {e}")
                                 return None
                         else:
                             error_text = await download_response.text()
-                            print(f"下载 artifact 失败，状态码: {download_response.status}，错误: {error_text}")
+                            logger.error(f"下载 artifact 失败，状态码: {download_response.status}，错误: {error_text}")
                             return None
-            print(f"未找到 artifact: {artifact_name}")
+            logger.warning(f"未找到 artifact: {artifact_name}")
             return None
         else:
             error_text = await response.text()
-            print(f"获取 artifact 列表失败，状态码: {response.status}，错误: {error_text}")
+            logger.error(f"获取 artifact 列表失败，状态码: {response.status}，错误: {error_text}")
             return None
 
 async def run_workflow(
@@ -189,19 +190,30 @@ if __name__ == "__main__":
     INPUTS = {}  # 可选：工作流输入参数
     ARTIFACT_NAME = "summarized"
     temp_dir = asyncio.run(run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME))
-    print(temp_dir)
+    logger.info(f"Workflow returned temp_dir: {temp_dir}")
     import polars as pl
-    try:
-        print(pl.read_parquet(os.path.join(temp_dir, "summarized.parquet")).head())
-    except Exception as e:
-        print(f"读取parquet文件失败: {e}")
-        exit(1)
+    if temp_dir and os.path.exists(temp_dir):
+        try:
+            parquet_path = os.path.join(temp_dir, "summarized.parquet")
+            if os.path.exists(parquet_path):
+                logger.info(f"Parquet head: {pl.read_parquet(parquet_path).head()}")
+            else:
+                logger.error(f"Parquet file not found at {parquet_path}")
+        except Exception as e:
+            logger.error(f"读取parquet文件失败: {e}", exc_info=True)
+    elif temp_dir:
+        logger.warning(f"Temporary directory {temp_dir} was specified but does not exist for Parquet reading.")
+    else:
+        logger.warning("Workflow did not return a temporary directory. Cannot read Parquet.")
+    
     # 运行完后，删除临时目录
     if temp_dir and os.path.exists(temp_dir):
         try:
-            os.rmdir(temp_dir)
-            print(f"成功删除临时目录: {temp_dir}")
+            shutil.rmtree(temp_dir)
+            logger.info(f"成功删除临时目录: {temp_dir}")
         except OSError as e:
-            print(f"删除临时目录失败: {e}")
+            logger.error(f"删除临时目录失败: {e}", exc_info=True)
+    elif temp_dir:
+        logger.info(f"临时目录 {temp_dir} 已被删除或不存在，无需再次操作。")
     else:
-        print("没有创建临时目录或目录已被删除")
+        logger.info("没有创建临时目录或目录已被删除。")

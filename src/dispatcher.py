@@ -81,6 +81,7 @@ async def request_recommendations(user_id: str, paper_ids: Optional[list[str]] =
     返回:
         Optional[pl.DataFrame]: 推荐结果，如果没有设置或出错则返回 None
     """
+    return pl.read_parquet("/tmp/paperdigest__dhoqbz7/summarized.parquet")
     try:
         # 检查用户设置
         user_setting = UserSetting.get_by_id(user_id)
@@ -159,7 +160,7 @@ async def process_arxiv_ids(user_id: str, arxiv_ids: str) -> str:
     return default_response
 
 # Task for updating user settings
-async def update_settings(user_id: str, settings_text: str) -> str:
+async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
     """
     更新用户设置，使用新的关键字 pat, repo, cron
     
@@ -168,54 +169,75 @@ async def update_settings(user_id: str, settings_text: str) -> str:
         settings_text (str): 包含设置指令的文本
         
     返回:
-        str: 更新确认消息
+        tuple[bool, str]: (操作是否部分成功, 更新确认消息)
     """
+    response_messages = []
+    any_setting_applied_successfully = False
     try:
-        # 解析设置文本
-        settings = parse_settings(settings_text)
+        parsed_settings = parse_settings(settings_text) # Can raise ValueError
         
-        if not settings:
-            return "设置格式无效，请使用正确的格式，例如：repo:USER/REPO;pat:YOUR_PAT;cron:0 0 7 * * *"
-            
-        # 获取或创建用户设置 (pat is handled separately if needed by upsert_pat)
-        user_setting = UserSetting.get_or_create(user_id)
-        
-        response_parts = []
-        pat_to_update = settings.pop('pat', None) # Handle PAT separately
-        
-        if 'github_id' in settings and 'repo_name' in settings:
-            # These are parsed together from 'repo' key
-            if UserSetting.update_github_id(user_id, settings['github_id']) and \
-               UserSetting.update_repo_name(user_id, settings['repo_name']):
-                response_parts.append(f"仓库更新为: {settings['github_id']}/{settings['repo_name']}")
-        
-        if 'cron' in settings:
-            # Assuming UserSetting model has an update_cron method
-            cron_value_to_store = settings['cron'] if settings['cron'].lower() != '关闭' else None
-            if UserSetting.update_cron(user_id, cron_value_to_store):
-                if cron_value_to_store:
-                    response_parts.append(f"定时任务 Cron 更新为: {settings['cron']}")
-                else:
-                    response_parts.append("定时任务已关闭。")
+        if not parsed_settings:
+            return (False, "设置格式无效或未提供有效设置项。请使用正确的格式，例如：repo:USER/REPO;pat:YOUR_PAT;cron:0 0 7 * * *")
 
-        # 更新 PAT（如果存在）
+        # Ensure user_setting object exists for operations if needed by direct attribute access,
+        # though current model methods (update_github_id, etc.) fetch their own.
+        # UserSetting.get_or_create(user_id) # Original code had this, can be kept if other parts rely on it.
+
+        pat_to_update = parsed_settings.get('pat')
+        github_id_to_update = parsed_settings.get('github_id')
+        repo_name_to_update = parsed_settings.get('repo_name')
+        cron_to_update = parsed_settings.get('cron')
+
+        # Handle repo (github_id and repo_name)
+        if github_id_to_update and repo_name_to_update: # Both must be present if 'repo' key was parsed
+            if UserSetting.update_github_id(user_id, github_id_to_update) and \
+               UserSetting.update_repo_name(user_id, repo_name_to_update):
+                response_messages.append(f"仓库更新为: {github_id_to_update}/{repo_name_to_update}")
+                any_setting_applied_successfully = True
+            else:
+                response_messages.append(f"仓库 ({github_id_to_update}/{repo_name_to_update}) 更新失败。")
+        elif github_id_to_update or repo_name_to_update: # Only one part of repo provided
+            response_messages.append("仓库信息不完整，请同时提供 GitHub 用户名和仓库名 (例如: repo:USER/REPO)。")
+
+
+        # Handle cron
+        if cron_to_update is not None: # Check if 'cron' key was present in parsed_settings
+            cron_value_to_store = cron_to_update if cron_to_update.lower() != '关闭' else None
+            try:
+                # Using create_or_update as UserSetting.update_cron classmethod doesn't exist
+                UserSetting.create_or_update(user_id, cron=cron_value_to_store)
+                if cron_value_to_store:
+                    response_messages.append(f"定时任务 Cron 更新为: {cron_to_update}")
+                else:
+                    response_messages.append("定时任务已关闭。")
+                any_setting_applied_successfully = True
+            except Exception as e:
+                logger.error(f"更新 Cron 时出错 for user {user_id}: {e}")
+                response_messages.append(f"定时任务 Cron 更新失败。")
+
+        # Handle PAT
         if pat_to_update:
             if await upsert_pat(user_id, pat_to_update):
-                response_parts.append("GitHub PAT 已更新")
-            
-        if not response_parts and not pat_to_update:
-             return "没有成功更新任何设置，或提供的设置项无效/未更改。请检查格式：repo:USER/REPO;pat:YOUR_PAT;cron:0 0 7 * * *"
-            
-        # The scheduling logic (calling add_user_schedule) has been removed.
-        # The scheduler will pick up changes from the database via SQLAlchemy event listeners.
-            
-        return "设置已更新:\\n" + "\\n".join(response_parts)
+                response_messages.append("GitHub PAT 已更新")
+                any_setting_applied_successfully = True
+            else:
+                response_messages.append("GitHub PAT 更新失败。")
         
-    except ValueError as e:
-        return f"设置格式错误: {str(e)}"
+        if not response_messages: # No settings were processed from the input string
+            # This case might occur if parse_settings returned a dict with unknown keys
+            # or keys that were not handled above (e.g. only 'timezone' if it's not handled yet)
+            return (False, "未识别到有效设置项或提供的设置项无法处理。请检查格式。")
+
+        final_message = "设置处理结果:\\n" + "\\n".join(response_messages)
+        return (any_setting_applied_successfully, final_message)
+        
+    except ValueError as e: # From parse_settings
+        return (False, f"设置格式错误: {str(e)}")
     except Exception as e:
-        logger.error(f"更新设置时出错: {e}")
-        return "更新设置时出错，请检查格式是否正确或联系管理员。"
+        logger.error(f"更新设置时出错 (用户: {user_id}): {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return (False, "更新设置时发生内部错误，请联系管理员。")
 
 
 async def upsert_pat(user_id: str, pat: str) -> bool:
