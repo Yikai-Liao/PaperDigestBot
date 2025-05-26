@@ -38,7 +38,7 @@ def markdown_to_telegram(md_text):
         formatted_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', formatted_text)
 
         # Remove remaining problematic characters
-        chars_to_remove = ['*', '_', '`', '~', '[', ']']
+        chars_to_remove = [ '~', '[', ']']
         for char in chars_to_remove:
             formatted_text = formatted_text.replace(char, '')
 

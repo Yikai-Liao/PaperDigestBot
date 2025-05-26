@@ -376,7 +376,7 @@ async def execute_scheduled_recommendation(user_id: str):
                     result = await scheduler.bot_application.bot.send_message(
                         chat_id=int(user_id),
                         text=rec_text,
-                        parse_mode='Markdown'
+                        parse_mode='MarkdownV2'
                     )
                     send_results.append(result)
                 except Exception as markdown_error:

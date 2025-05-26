@@ -229,7 +229,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                 result = await context.bot.send_message(
                     chat_id=chat_id,
                     text=rec,
-                    parse_mode='Markdown'
+                    parse_mode='MarkdownV2'
                 )
                 send_results.append(result)
             except Exception as markdown_error:
