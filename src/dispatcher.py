@@ -10,7 +10,7 @@ import polars as pl # Assuming polars is used elsewhere or intended for request_
 import os # Assuming os is used elsewhere or intended for request_recommendations
 from typing import Optional, Dict, Any
 from src.models import UserSetting
-
+from src.utils import REPO_DIR
 
 def parse_settings(settings_text: str) -> Dict[str, Any]:
     """
@@ -106,6 +106,7 @@ async def request_recommendations(user_id: str, paper_ids: Optional[list[str]] =
         BRANCH = "main"  # 替换为分支名称
         INPUTS = {}  # 可选：工作流输入参数
         ARTIFACT_NAME = "summarized"
+        return pl.read_parquet(REPO_DIR / "tests" / "data" / "summarized.parquet")
 
         tmp_dir = await run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME)
         try:

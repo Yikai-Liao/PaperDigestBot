@@ -20,27 +20,38 @@ def markdown_to_telegram(md_text):
     """
     Convert Markdown text to a format compatible with Telegram.
     Uses plain text format to avoid markdown parsing issues.
+
+    Args:
+        md_text (str): Markdown text to convert. Should always be a string.
+
+    Returns:
+        str: Plain text suitable for Telegram
     """
     try:
-        # Remove markdown formatting and convert to plain text
-        # Replace Markdown bold (**text**) with plain text
-        formatted_text = re.sub(r'\*\*(.*?)\*\*', r'\1', md_text)
+        # Simple and fast approach: just remove all markdown characters
+        # This avoids complex regex that could cause performance issues
 
-        # Replace Markdown italic (*text*) with plain text
-        formatted_text = re.sub(r'\*(.*?)\*', r'\1', formatted_text)
+        # Remove markdown bold (**text**)
+        formatted_text = md_text.replace('**', '')
 
-        # Replace Markdown links ([text](url)) with plain text format
+        # Remove markdown links [text](url) -> text (url)
         formatted_text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', formatted_text)
 
-        # Remove any remaining markdown characters that might cause issues
-        formatted_text = re.sub(r'[`~]', '', formatted_text)
+        # Remove remaining problematic characters
+        chars_to_remove = ['*', '_', '`', '~', '[', ']']
+        for char in chars_to_remove:
+            formatted_text = formatted_text.replace(char, '')
 
         return formatted_text
 
     except Exception as e:
         logger.error(f"Error converting markdown to telegram format: {e}")
         # Return plain text without any formatting as fallback
-        return re.sub(r'[*_`~\[\]()]', '', md_text)
+        try:
+            return re.sub(r'[*_`~\[\]()]', '', str(md_text))
+        except:
+            logger.error(f"Critical error in markdown_to_telegram fallback with input: {type(md_text)}")
+            return "Error processing text"
 
 def validate_telegram_message(text):
     """
@@ -90,13 +101,36 @@ def render_summary_tg(df: pl.DataFrame) -> dict[str, str]:
 
             # Ensure all required fields have safe values
             safe_row = {}
-            for field in ['title', 'one_sentence_summary', 'problem_background', 'method', 'experiment', 'further_thoughts', 'authors', 'institution', 'updated', 'model']:
+
+            # Handle list fields specially (authors, institution)
+            list_fields = ['authors', 'institution']
+            for field in list_fields:
+                if field in row and row[field] is not None:
+                    if isinstance(row[field], list):
+                        # Clean each item in the list
+                        cleaned_list = []
+                        for item in row[field]:
+                            if item:
+                                cleaned_item = str(item).replace('\x00', '').replace('\r', '').strip()
+                                if cleaned_item:
+                                    cleaned_list.append(cleaned_item)
+                        safe_row[field] = cleaned_list
+                    else:
+                        # If it's not a list, convert to string and clean
+                        value = str(row[field]).replace('\x00', '').replace('\r', '').strip()
+                        safe_row[field] = [value] if value else []
+                else:
+                    safe_row[field] = []
+
+            # Handle string fields
+            string_fields = ['title', 'one_sentence_summary', 'problem_background', 'method', 'experiment', 'further_thoughts', 'updated', 'model']
+            for field in string_fields:
                 if field in row and row[field] is not None:
                     # Convert to string and clean up
                     value = str(row[field])
                     # Remove any problematic characters
-                    value = value.replace('\x00', '').replace('\r', '')
-                    safe_row[field] = value
+                    value = value.replace('\x00', '').replace('\r', '').strip()
+                    safe_row[field] = value if value else "N/A"
                 else:
                     safe_row[field] = "N/A"
 
