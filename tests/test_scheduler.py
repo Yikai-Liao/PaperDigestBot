@@ -33,7 +33,8 @@ class TestPaperDigestScheduler:
     @patch('src.scheduler.default_config')
     def test_scheduler_initialization_with_mock_db(self, mock_config):
         """Test scheduler initialization with mocked database config."""
-        mock_config.dsn = "sqlite:///:memory:"
+        # Use PostgreSQL test database instead of SQLite
+        mock_config.dsn = "postgresql+psycopg2://postgres:root@localhost:5432/paper_digest_test"
         mock_bot = Mock(spec=Application)
 
         # Test initialization
@@ -328,32 +329,46 @@ class TestScheduledExecution:
         if self.scheduler.scheduler is not None:
             self.scheduler.shutdown()
 
-    async def test_execute_scheduled_recommendation_no_bot(self):
+    @patch('src.scheduler.get_scheduler')
+    async def test_execute_scheduled_recommendation_no_bot(self, mock_get_scheduler):
         """Test execution when bot application is not available."""
-        # Clear bot application
-        self.scheduler.bot_application = None
+        # Mock scheduler with no bot application
+        mock_scheduler = Mock()
+        mock_scheduler.bot_application = None
+        mock_get_scheduler.return_value = mock_scheduler
 
+        # Import the module-level function
+        from src.scheduler import execute_scheduled_recommendation
         # Should not crash, just log error
-        await self.scheduler.execute_scheduled_recommendation("test_user")
+        await execute_scheduled_recommendation("test_user")
 
         # No assertions needed, just verify it doesn't crash
 
+    @patch('src.scheduler.get_scheduler')
     @patch('src.scheduler.UserSetting')
-    async def test_execute_scheduled_recommendation_no_user(self, mock_user_setting):
+    async def test_execute_scheduled_recommendation_no_user(self, mock_user_setting, mock_get_scheduler):
         """Test execution when user settings are not found."""
         mock_user_setting.get_by_id.return_value = None
 
         mock_bot = Mock(spec=Application)
-        self.scheduler.bot_application = mock_bot
+        mock_scheduler = Mock()
+        mock_scheduler.bot_application = mock_bot
+        mock_scheduler.remove_user_schedule = Mock(return_value=True)
+        mock_get_scheduler.return_value = mock_scheduler
 
-        await self.scheduler.execute_scheduled_recommendation("test_user")
+        # Import the module-level function
+        from src.scheduler import execute_scheduled_recommendation
+        await execute_scheduled_recommendation("test_user")
 
         # Should have tried to remove the schedule
         mock_user_setting.get_by_id.assert_called_once_with("test_user")
+        mock_scheduler.remove_user_schedule.assert_called_once_with("test_user")
 
+    @patch('src.scheduler.get_scheduler')
     @patch('src.scheduler.UserSetting')
     @patch('src.scheduler.request_recommendations')
-    async def test_execute_scheduled_recommendation_success(self, mock_request_recommendations, mock_user_setting):
+    @patch('src.scheduler.MessageRecord')
+    async def test_execute_scheduled_recommendation_success(self, mock_message_record, mock_request_recommendations, mock_user_setting, mock_get_scheduler):
         """Test successful execution of scheduled recommendation."""
         # Mock user setting
         mock_user = Mock()
@@ -371,21 +386,47 @@ class TestScheduledExecution:
         # Mock bot
         mock_bot = Mock(spec=Application)
         mock_bot.bot = AsyncMock()
-        self.scheduler.bot_application = mock_bot
+
+        # Mock message objects with message_id
+        mock_message1 = Mock()
+        mock_message1.message_id = 12345
+        mock_message2 = Mock()
+        mock_message2.message_id = 12346
+        mock_bot.bot.send_message.side_effect = [
+            mock_message1,  # Header message (not recorded)
+            mock_message1,  # First recommendation
+            mock_message2   # Second recommendation
+        ]
+
+        # Mock scheduler
+        mock_scheduler = Mock()
+        mock_scheduler.bot_application = mock_bot
+        mock_get_scheduler.return_value = mock_scheduler
+
+        # Mock MessageRecord.create
+        mock_record = Mock()
+        mock_record.id = "test_record_id"
+        mock_message_record.create.return_value = mock_record
 
         # Mock render function
         with patch('src.scheduler.render_summary_tg') as mock_render:
             mock_render.return_value = {"paper1": "Summary 1", "paper2": "Summary 2"}
 
-            await self.scheduler.execute_scheduled_recommendation("123456789")
+            # Import the module-level function
+            from src.scheduler import execute_scheduled_recommendation
+            await execute_scheduled_recommendation("123456789")
 
             # Verify bot messages were sent
             assert mock_bot.bot.send_message.call_count >= 3  # Header + 2 recommendations
             mock_request_recommendations.assert_called_once_with("123456789")
 
+            # Verify message records were created
+            assert mock_message_record.create.call_count == 2  # One for each recommendation
+
+    @patch('src.scheduler.get_scheduler')
     @patch('src.scheduler.UserSetting')
     @patch('src.scheduler.request_recommendations')
-    async def test_execute_scheduled_recommendation_no_recommendations(self, mock_request_recommendations, mock_user_setting):
+    async def test_execute_scheduled_recommendation_no_recommendations(self, mock_request_recommendations, mock_user_setting, mock_get_scheduler):
         """Test execution when no recommendations are available."""
         # Mock user setting
         mock_user = Mock()
@@ -403,9 +444,15 @@ class TestScheduledExecution:
         # Mock bot
         mock_bot = Mock(spec=Application)
         mock_bot.bot = AsyncMock()
-        self.scheduler.bot_application = mock_bot
 
-        await self.scheduler.execute_scheduled_recommendation("123456789")
+        # Mock scheduler
+        mock_scheduler = Mock()
+        mock_scheduler.bot_application = mock_bot
+        mock_get_scheduler.return_value = mock_scheduler
+
+        # Import the module-level function
+        from src.scheduler import execute_scheduled_recommendation
+        await execute_scheduled_recommendation("123456789")
 
         # Verify no-recommendations message was sent
         mock_bot.bot.send_message.assert_called_once()

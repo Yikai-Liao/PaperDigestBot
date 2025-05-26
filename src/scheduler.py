@@ -14,7 +14,7 @@ from loguru import logger
 import pytz
 from telegram.ext import Application
 
-from src.models import UserSetting
+from src.models import UserSetting, MessageRecord
 from src.dispatcher import request_recommendations
 from src.render import render_summary_tg
 from src.db_config import default_config
@@ -127,100 +127,7 @@ class PaperDigestScheduler:
         else:
             raise ValueError(f"Invalid cron expression format. Expected 5 or 6 fields, got {len(parts)}")
 
-    async def execute_scheduled_recommendation(self, user_id: str):
-        """
-        Execute scheduled recommendation for a user.
 
-        This function is called by the scheduler when a user's cron job triggers.
-        It fetches recommendations and sends them to the user via Telegram.
-
-        Args:
-            user_id: The user ID to send recommendations to
-        """
-        try:
-            logger.info(f"Executing scheduled recommendation for user {user_id}")
-
-            # Check if bot application is available
-            if self.bot_application is None:
-                logger.error("Bot application not available for sending messages")
-                return
-
-            # Get user settings to verify they're still valid
-            user_setting = UserSetting.get_by_id(user_id)
-            if not user_setting:
-                logger.warning(f"User {user_id} settings not found, removing scheduled job")
-                self.remove_user_schedule(user_id)
-                return
-
-            # Check if user still has cron setting
-            if not user_setting.cron:
-                logger.info(f"User {user_id} no longer has cron setting, removing scheduled job")
-                self.remove_user_schedule(user_id)
-                return
-
-            # Verify user has required settings
-            if not user_setting.pat or not user_setting.github_id or not user_setting.repo_name:
-                logger.warning(f"User {user_id} missing required settings for recommendations")
-                # Send error message to user
-                try:
-                    await self.bot_application.bot.send_message(
-                        chat_id=int(user_id),
-                        text="⚠️ 定时推荐失败：您的设置不完整。请使用 /setting 命令检查并完善您的配置。"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send error message to user {user_id}: {e}")
-                return
-
-            # Request recommendations
-            recommendations = await request_recommendations(user_id)
-            if recommendations is None or len(recommendations) == 0:
-                logger.info(f"No recommendations available for user {user_id}")
-                # Optionally send a message to user about no recommendations
-                try:
-                    await self.bot_application.bot.send_message(
-                        chat_id=int(user_id),
-                        text="📚 定时推荐：目前没有新的论文推荐。"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send no-recommendations message to user {user_id}: {e}")
-                return
-
-            # Format recommendations for Telegram
-            try:
-                # Use thread pool for CPU-intensive rendering
-                loop = asyncio.get_running_loop()
-                from concurrent.futures import ThreadPoolExecutor
-                with ThreadPoolExecutor() as executor:
-                    formatted = await loop.run_in_executor(executor, render_summary_tg, recommendations)
-            except Exception as e:
-                logger.error(f"Failed to format recommendations for user {user_id}: {e}")
-                return
-
-            # Send recommendations to user
-            try:
-                # Send header message
-                await self.bot_application.bot.send_message(
-                    chat_id=int(user_id),
-                    text="📚 定时推荐：为您推荐的论文摘要如下："
-                )
-
-                # Send each recommendation
-                for rec_text in formatted.values():
-                    await self.bot_application.bot.send_message(
-                        chat_id=int(user_id),
-                        text=rec_text,
-                        parse_mode='Markdown'
-                    )
-
-                logger.info(f"Successfully sent {len(formatted)} recommendations to user {user_id}")
-
-            except Exception as e:
-                logger.error(f"Failed to send recommendations to user {user_id}: {e}")
-
-        except Exception as e:
-            logger.error(f"Error in scheduled recommendation for user {user_id}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def add_user_schedule(self, user_id: str, cron_expression: str) -> bool:
         """
@@ -242,8 +149,9 @@ class PaperDigestScheduler:
             job_id = f"user_recommendation_{user_id}"
 
             # Use APScheduler's add_job with cron trigger directly
+            # Use module-level function to avoid serialization issues
             self.scheduler.add_job(
-                self.execute_scheduled_recommendation,
+                execute_scheduled_recommendation,
                 'cron',
                 args=[user_id],
                 id=job_id,
@@ -379,6 +287,143 @@ class PaperDigestScheduler:
         except Exception as e:
             logger.error(f"Failed to sync schedule for user {user_id}: {e}")
             return False
+
+
+# Module-level function to avoid serialization issues with scheduler instances
+async def execute_scheduled_recommendation(user_id: str):
+    """
+    Execute a scheduled recommendation for a user.
+    This function will be called by APScheduler.
+
+    Args:
+        user_id: The user ID to generate recommendations for
+    """
+    try:
+        logger.info(f"Executing scheduled recommendation for user {user_id}")
+
+        # Get the global scheduler instance to access bot application
+        scheduler = get_scheduler()
+
+        # Check if bot application is available
+        if scheduler.bot_application is None:
+            logger.error("Bot application not available for scheduled recommendation")
+            return
+
+        # Get user settings to verify they still exist and are valid
+        user_setting = UserSetting.get_by_id(user_id)
+        if not user_setting:
+            logger.warning(f"User {user_id} not found, removing schedule")
+            scheduler.remove_user_schedule(user_id)
+            return
+
+        # Check if user still has cron setting
+        if not user_setting.cron:
+            logger.info(f"User {user_id} no longer has cron setting, removing scheduled job")
+            scheduler.remove_user_schedule(user_id)
+            return
+
+        # Verify user has required settings
+        if not user_setting.pat or not user_setting.github_id or not user_setting.repo_name:
+            logger.warning(f"User {user_id} missing required settings for recommendations")
+            # Send error message to user
+            try:
+                await scheduler.bot_application.bot.send_message(
+                    chat_id=int(user_id),
+                    text="⚠️ 定时推荐失败：您的设置不完整。请使用 /setting 命令检查并完善您的配置。"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send error message to user {user_id}: {e}")
+            return
+
+        # Request recommendations
+        recommendations = await request_recommendations(user_id)
+        if recommendations is None or len(recommendations) == 0:
+            logger.info(f"No recommendations available for user {user_id}")
+            # Optionally send a message to user about no recommendations
+            try:
+                await scheduler.bot_application.bot.send_message(
+                    chat_id=int(user_id),
+                    text="📚 定时推荐：目前没有新的论文推荐。"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send no-recommendations message to user {user_id}: {e}")
+            return
+
+        # Format recommendations for Telegram
+        try:
+            # Use thread pool for CPU-intensive rendering
+            loop = asyncio.get_running_loop()
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor() as executor:
+                formatted = await loop.run_in_executor(executor, render_summary_tg, recommendations)
+        except Exception as e:
+            logger.error(f"Failed to format recommendations for user {user_id}: {e}")
+            return
+
+        # Send recommendations to user
+        try:
+            # Send header message
+            await scheduler.bot_application.bot.send_message(
+                chat_id=int(user_id),
+                text="📚 定时推荐：为您推荐的论文摘要如下："
+            )
+
+            # Send each recommendation and record messages
+            send_results = []
+            tasks = [
+                scheduler.bot_application.bot.send_message(
+                    chat_id=int(user_id),
+                    text=rec_text,
+                    parse_mode='Markdown'
+                )
+                for rec_text in formatted.values()
+            ]
+            send_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Record messages to database (similar to process_recommendations_background)
+            for result, arxiv_id in zip(send_results, recommendations['id']):
+                try:
+                    # Handle exceptions in send_results
+                    if isinstance(result, Exception):
+                        logger.error(f"发送定时推荐消息时出错: {result}")
+                        continue
+
+                    # Extract message_id from the Message object
+                    message_id = None
+                    if hasattr(result, 'message_id'):
+                        message_id = result.message_id
+                        logger.debug(f"成功提取定时推荐消息 message_id: {message_id}")
+                    else:
+                        logger.error(f"定时推荐消息对象没有message_id属性. 可用属性: {dir(result)}")
+                        continue
+
+                    if message_id is None:
+                        logger.error(f"定时推荐消息 message_id为None，跳过记录")
+                        continue
+
+                    # Create message record
+                    record = MessageRecord.create(
+                        group_id=None,  # 定时推荐都是私聊
+                        user_id=user_id,
+                        message_id=message_id,
+                        arxiv_id=arxiv_id,
+                        repo_name=user_setting.repo_name,
+                    )
+                    logger.info(f"定时推荐消息记录创建成功 - ID: {record.id}, ArXiv: {arxiv_id}")
+                except Exception as e:
+                    logger.error(f"记录定时推荐消息时出错: {e}")
+                    import traceback
+                    logger.error(f"详细错误信息: {traceback.format_exc()}")
+
+            logger.info(f"Successfully sent {len(formatted)} scheduled recommendations to user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to send scheduled recommendations to user {user_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in scheduled recommendation for user {user_id}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 # Global scheduler instance for the application
