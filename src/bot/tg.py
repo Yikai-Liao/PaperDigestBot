@@ -221,11 +221,29 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         formatted: dict[str, str] = await run_in_global_pool(render_summary_tg, recommendations)
         logger.debug(f"Formatted recommendations: {formatted}")
 
-        tasks = [
-            context.bot.send_message(chat_id=chat_id, text=rec, parse_mode='Markdown')
-            for rec in formatted.values()
-        ]
-        send_results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Send each recommendation with error handling
+        send_results = []
+        for rec in formatted.values():
+            try:
+                # Try sending with Markdown first
+                result = await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=rec,
+                    parse_mode='Markdown'
+                )
+                send_results.append(result)
+            except Exception as markdown_error:
+                logger.warning(f"Failed to send message with Markdown, trying plain text: {markdown_error}")
+                try:
+                    # Fallback to plain text without parse_mode
+                    result = await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=rec
+                    )
+                    send_results.append(result)
+                except Exception as plain_error:
+                    logger.error(f"Failed to send message even with plain text: {plain_error}")
+                    send_results.append(plain_error)
 
         # 简化 record_messages 调用
         user_setting = UserSetting.get_by_id(user_id)

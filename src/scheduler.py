@@ -370,15 +370,27 @@ async def execute_scheduled_recommendation(user_id: str):
 
             # Send each recommendation and record messages
             send_results = []
-            tasks = [
-                scheduler.bot_application.bot.send_message(
-                    chat_id=int(user_id),
-                    text=rec_text,
-                    parse_mode='Markdown'
-                )
-                for rec_text in formatted.values()
-            ]
-            send_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for rec_text in formatted.values():
+                try:
+                    # Try sending with Markdown first
+                    result = await scheduler.bot_application.bot.send_message(
+                        chat_id=int(user_id),
+                        text=rec_text,
+                        parse_mode='Markdown'
+                    )
+                    send_results.append(result)
+                except Exception as markdown_error:
+                    logger.warning(f"Failed to send message with Markdown, trying plain text: {markdown_error}")
+                    try:
+                        # Fallback to plain text without parse_mode
+                        result = await scheduler.bot_application.bot.send_message(
+                            chat_id=int(user_id),
+                            text=rec_text
+                        )
+                        send_results.append(result)
+                    except Exception as plain_error:
+                        logger.error(f"Failed to send message even with plain text: {plain_error}")
+                        send_results.append(plain_error)
 
             # Record messages to database (similar to process_recommendations_background)
             for result, arxiv_id in zip(send_results, recommendations['id']):
