@@ -15,28 +15,28 @@ from src.models import UserSetting
 def parse_settings(settings_text: str) -> Dict[str, Any]:
     """
     解析设置文本为结构化数据
-    
+
     参数:
         settings_text (str): 设置文本，支持以下格式：
             - repo:USER/REPO;pat:YOUR_PAT;cron:0 0 7 * * *;timezone:Asia/Shanghai
             - 单独设置也支持，用分号隔开
-            
+
     返回:
         Dict[str, Any]: 解析后的设置字典
     """
     settings = {}
     # 分割不同的设置项
     items = settings_text.split(';')
-    
+
     for item in items:
         if not item.strip():
             continue
-            
+
         try:
             key, value = item.split(':', 1)
             key = key.strip().lower()
             value = value.strip()
-            
+
             if key == 'pat':
                 if not value:
                     raise ValueError("PAT 不能为空")
@@ -66,39 +66,38 @@ def parse_settings(settings_text: str) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"无法解析设置项: {item}, 错误: {e}")
             raise ValueError(f"无法解析设置项: {item}")
-            
+
     return settings
 
 # Task for handling paper recommendation requests
 async def request_recommendations(user_id: str, paper_ids: Optional[list[str]] = None) -> Optional[pl.DataFrame]:
     """
     处理用户论文推荐请求的任务
-    
+
     参数:
         user_id (str): 请求推荐的用户ID
         paper_ids (Optional[list[str]]): 可选的论文ID列表，如果提供则只返回这些ID的论文
-        
+
     返回:
         Optional[pl.DataFrame]: 推荐结果，如果没有设置或出错则返回 None
     """
-    return pl.read_parquet("/tmp/paperdigest__dhoqbz7/summarized.parquet")
     try:
         # 检查用户设置
         user_setting = UserSetting.get_by_id(user_id)
         if not user_setting:
             logger.warning(f"用户 {user_id} 没有设置，无法获取推荐")
             return None
-            
+
         # 检查用户是否设置了 PAT
         if not user_setting.pat:
             logger.warning(f"用户 {user_id} 没有设置 PAT，无法获取推荐")
             return None
-            
+
         # 检查用户是否设置了仓库信息
         if not user_setting.github_id or not user_setting.repo_name:
             logger.warning(f"用户 {user_id} 没有设置仓库信息，无法获取推荐")
             return None
-            
+
         # 使用用户的设置运行工作流
         PAT = user_setting.pat
         OWNER = user_setting.github_id  # 使用用户的 GitHub ID
@@ -107,7 +106,7 @@ async def request_recommendations(user_id: str, paper_ids: Optional[list[str]] =
         BRANCH = "main"  # 替换为分支名称
         INPUTS = {}  # 可选：工作流输入参数
         ARTIFACT_NAME = "summarized"
-        
+
         tmp_dir = await run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME)
         try:
             return pl.read_parquet(os.path.join(tmp_dir, "summarized.parquet"))
@@ -123,17 +122,17 @@ async def process_arxiv_ids(user_id: str, arxiv_ids: str) -> str:
     """
     Task to process a list of Arxiv IDs provided by a user.
     Returns a default result without actual processing.
-    
+
     Args:
         user_id (str): The user ID submitting Arxiv IDs
         arxiv_ids (str): String containing Arxiv IDs, possibly in multiple formats
-        
+
     Returns:
         str: Default processing response in markdown format
     """
     # Parse the input to extract Arxiv IDs (simplified for this example)
     arxiv_id_list = [id.strip() for id in arxiv_ids.split() if id.strip()]
-    
+
     # Generate default response with the IDs
     default_response = f"""
 # 论文摘要结果
@@ -153,21 +152,21 @@ async def process_arxiv_ids(user_id: str, arxiv_ids: str) -> str:
 **摘要**: 这是一个示例论文摘要，实际处理时会返回真实论文的摘要内容。
 
 """
-    
+
     if len(arxiv_id_list) > 3:
         default_response += f"\n... 以及其他 {len(arxiv_id_list) - 3} 篇论文的摘要 ..."
-        
+
     return default_response
 
 # Task for updating user settings
 async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
     """
     更新用户设置，使用新的关键字 pat, repo, cron
-    
+
     参数:
         user_id (str): 更新设置的用户ID
         settings_text (str): 包含设置指令的文本
-        
+
     返回:
         tuple[bool, str]: (操作是否部分成功, 更新确认消息)
     """
@@ -175,7 +174,7 @@ async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
     any_setting_applied_successfully = False
     try:
         parsed_settings = parse_settings(settings_text) # Can raise ValueError
-        
+
         if not parsed_settings:
             return (False, "设置格式无效或未提供有效设置项。请使用正确的格式，例如：repo:USER/REPO;pat:YOUR_PAT;cron:0 0 7 * * *")
 
@@ -206,11 +205,18 @@ async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
             try:
                 # Using create_or_update as UserSetting.update_cron classmethod doesn't exist
                 UserSetting.create_or_update(user_id, cron=cron_value_to_store)
-                if cron_value_to_store:
-                    response_messages.append(f"定时任务 Cron 更新为: {cron_to_update}")
+
+                # Update scheduler with new cron setting
+                from src.scheduler import sync_user_schedule_from_settings
+                if sync_user_schedule_from_settings(user_id):
+                    if cron_value_to_store:
+                        response_messages.append(f"定时任务 Cron 更新为: {cron_to_update}")
+                    else:
+                        response_messages.append("定时任务已关闭。")
+                    any_setting_applied_successfully = True
                 else:
-                    response_messages.append("定时任务已关闭。")
-                any_setting_applied_successfully = True
+                    response_messages.append("定时任务设置已保存，但调度器更新失败。")
+
             except Exception as e:
                 logger.error(f"更新 Cron 时出错 for user {user_id}: {e}")
                 response_messages.append(f"定时任务 Cron 更新失败。")
@@ -222,7 +228,7 @@ async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
                 any_setting_applied_successfully = True
             else:
                 response_messages.append("GitHub PAT 更新失败。")
-        
+
         if not response_messages: # No settings were processed from the input string
             # This case might occur if parse_settings returned a dict with unknown keys
             # or keys that were not handled above (e.g. only 'timezone' if it's not handled yet)
@@ -230,7 +236,7 @@ async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
 
         final_message = "设置处理结果:\\n" + "\\n".join(response_messages)
         return (any_setting_applied_successfully, final_message)
-        
+
     except ValueError as e: # From parse_settings
         return (False, f"设置格式错误: {str(e)}")
     except Exception as e:
@@ -243,11 +249,11 @@ async def update_settings(user_id: str, settings_text: str) -> tuple[bool, str]:
 async def upsert_pat(user_id: str, pat: str) -> bool:
     """
     更新或插入用户的 PAT (Personal Access Token) 的任务
-    
+
     参数:
         user_id (str): 要更新 PAT 的用户ID
         pat (str): 要存储的个人访问令牌
-        
+
     返回:
         bool: 操作是否成功
     """
@@ -260,7 +266,7 @@ async def upsert_pat(user_id: str, pat: str) -> bool:
             # 创建新用户设置
             user_setting = UserSetting(id=user_id, pat=pat)
             user_setting.save()
-        
+
         logger.debug(f"PAT [{pat[:4]}...] for user {user_id} has been upserted.")
         return True
     except Exception as e:

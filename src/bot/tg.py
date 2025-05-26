@@ -54,7 +54,7 @@ if os.getenv('TEST_MODE', 'false').lower() != 'true':
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 else:
     application = None  # Will be mocked in tests
-    
+
 # 设置自定义命令菜单
 # from telegram import BotCommand # Already imported
 
@@ -91,20 +91,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def format_pat_safely(pat: str) -> str:
     """
     安全格式化PAT，只显示开头和结尾部分，中间用**替代
-    
+
     Args:
         pat: GitHub Personal Access Token
-        
+
     Returns:
         str: 格式化后的PAT字符串
     """
     if not pat:
         return "未设置"
-    
+
     if len(pat) <= 8:
         # 如果PAT太短，只显示开头几位
         return pat[:2] + "**"
-    
+
     # 显示开头4位和结尾4位，中间用**替代
     return pat[:8] + "**" + pat[-8:]
 
@@ -136,10 +136,10 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=Fa
 async def check_user_settings(user_id: str) -> tuple[bool, str]:
     """
     检查用户设置是否完整，包括必要的配置项
-    
+
     Args:
         user_id: 用户ID
-        
+
     Returns:
         tuple[bool, str]: (设置是否完整, 错误消息)
     """
@@ -147,18 +147,18 @@ async def check_user_settings(user_id: str) -> tuple[bool, str]:
         user_setting = UserSetting.get_by_id(user_id)
         if not user_setting:
             return False, "您还没有进行任何设置。请使用 /setting 命令进行配置。"
-                         
+
         if not user_setting.pat:
             return False, "您还没有设置 GitHub PAT。请使用 /setting 命令进行配置。"
-                         
+
         if not user_setting.github_id or not user_setting.repo_name:
             return False, "您还没有设置 GitHub 仓库信息。请使用 /setting 命令进行配置。"
-                         
+
         # Cron is optional, so no check for its absence unless it's malformed or a schedule is expected
         # If cron exists and is not '关闭', it should be a valid cron string.
         # This validation is primarily handled in parse_settings and when scheduling.
         return True, ""
-        
+
     except Exception as e:
         logger.error(f"检查用户设置时出错: {e}")
         return False, "检查用户设置时出错，请稍后再试或联系管理员。"
@@ -170,7 +170,7 @@ def record_messages(send_results, update: Update, recommendations: pl.DataFrame)
     if not user_setting:
         logger.error(f"User {user_id} settings not found")
         return
-    
+
     logger.info(f"找到用户设置 - 仓库名: {user_setting.repo_name}")
 
     for result, arxiv_id in zip(send_results, recommendations['id']):
@@ -200,7 +200,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                 message_id=message_id
             )
             return
-            
+
         # Request recommendations from Dispatcher
         recommendations = await request_recommendations(user_id)
         if recommendations is None:
@@ -216,17 +216,17 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                 chat_id=chat_id,
                 message_id=message_id
             )
-            
+
         # Format recommendations for Telegram
         formatted: dict[str, str] = await run_in_global_pool(render_summary_tg, recommendations)
         logger.debug(f"Formatted recommendations: {formatted}")
-        
+
         tasks = [
             context.bot.send_message(chat_id=chat_id, text=rec, parse_mode='Markdown')
             for rec in formatted.values()
         ]
         send_results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         # 简化 record_messages 调用
         user_setting = UserSetting.get_by_id(user_id)
         if user_setting:
@@ -236,11 +236,11 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                     if isinstance(result, Exception):
                         logger.error(f"发送消息时出错: {result}")
                         continue
-                    
+
                     # Debug: check what result contains
                     logger.debug(f"Result type: {type(result)}")
                     logger.debug(f"Result object: {result}")
-                    
+
                     # Extract message_id from the Message object
                     message_id = None
                     if hasattr(result, 'message_id'):
@@ -249,11 +249,11 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                     else:
                         logger.error(f"Message对象没有message_id属性. 可用属性: {dir(result)}")
                         continue
-                    
+
                     if message_id is None:
                         logger.error(f"message_id为None，跳过记录")
                         continue
-                    
+
                     record = MessageRecord.create(
                         group_id=None,  # 私聊
                         user_id=user_id,
@@ -266,7 +266,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                     logger.error(f"记录消息时出错: {e}")
                     import traceback
                     logger.error(f"详细错误信息: {traceback.format_exc()}")
-        
+
         logger.info(f"Sent {len(send_results)} recommendations to user {user_id}")
 
     except Exception as e:
@@ -280,7 +280,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         except Exception as edit_error:
             logger.error(f"Failed to edit error message: {edit_error}")
 
-# Handler for recommend command  
+# Handler for recommend command
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handler for the /recommend command.
@@ -288,7 +288,7 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     logger.info(f"User {update.effective_user.id} requested paper recommendations")
     initial_message = await update.message.reply_text("正在获取您的论文推荐，请稍候...")
-    
+
     # 将处理逻辑提交到后台线程池
     asyncio.create_task(
         process_recommendations_background(
@@ -298,7 +298,7 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context=context
         )
     )
-    
+
     logger.info(f"Recommendation request queued for user {update.effective_user.id}")
     # 立即返回，不等待后台任务完成
     return
@@ -319,12 +319,12 @@ async def display_current_settings(update: Update, context: ContextTypes.DEFAULT
             )
             await setting(update, context, initial=True)
             return
-            
+
         # 格式化当前设置
         pat_display = format_pat_safely(user_setting.pat) if user_setting.pat else "未设置"
         repo_display = f"{user_setting.github_id}/{user_setting.repo_name}" if user_setting.github_id and user_setting.repo_name else "未设置"
         cron_display = user_setting.cron if user_setting.cron else "未设置"
-        
+
         settings_message = (
             "📋 *当前设置*\n\n"
             f"• **PAT**: `{pat_display}`\n"
@@ -337,9 +337,9 @@ async def display_current_settings(update: Update, context: ContextTypes.DEFAULT
             "`/setting repo:USER/REPO`\n"
             "`/setting cron:0 0 7 * * *` (或 `cron:关闭`)"
         )
-        
+
         await update.message.reply_markdown(settings_message)
-        
+
     except Exception as e:
         logger.error(f"显示用户设置时出错: {e}")
         await update.message.reply_text("获取设置信息时出错，请稍后再试。")
@@ -358,18 +358,18 @@ async def update_settings_command(update: Update, context: ContextTypes.DEFAULT_
 
     settings_text = " ".join(context.args)
     logger.info(f"User {user_id} attempting to update settings with: {settings_text}")
-    
+
     # Call the dispatcher's update_settings function
     # This function is expected to return a tuple: (bool_success, str_message)
-    success, message = await update_settings(user_id, settings_text) 
-    
+    success, message = await update_settings(user_id, settings_text)
+
     await update.message.reply_text(message)
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     处理用户对消息的反应（点赞等表情）
     每个用户对同一消息只能有一个反应，新的反应会替换旧的反应
-    
+
     Args:
         update: 更新对象
         context: 上下文对象
@@ -379,23 +379,23 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not hasattr(update, 'message_reaction'):
             logger.warning("update 对象中没有 message_reaction 属性")
             return
-            
+
         reaction = update.message_reaction
         if not reaction:
             logger.warning("message_reaction 为空")
             return
-            
+
         user_id = str(update.effective_user.id)
-        
+
         # 获取群组ID（如果在群组中）
         group_id = None
         if update.effective_chat and update.effective_chat.type in ['group', 'supergroup']:
             group_id = str(update.effective_chat.id)
-        
+
         # 获取 emoji
         emoji = None
         is_removing = False
-        
+
         # 检查是否是添加反应
         if hasattr(reaction, 'new_reaction') and reaction.new_reaction:
             for r in reaction.new_reaction:
@@ -410,31 +410,31 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     emoji = r.emoji
                     is_removing = True
                     break
-                    
+
         if not emoji:
             logger.warning("无法获取 emoji")
             return
-            
+
         # 获取消息ID
         message_id = reaction.message_id if hasattr(reaction, 'message_id') else None
-            
+
         if not message_id:
             logger.warning(f"无法获取消息ID")
             return
-            
+
         logger.info(f"收到用户 {user_id} 对消息 {message_id} 的{'移除' if is_removing else '添加'}反应: {emoji}")
-        
+
         # 获取消息记录 - 使用更精确的查找方法
         record = MessageRecord.get_by_context(group_id, user_id, message_id)
         if not record:
             logger.warning(f"未找到消息 {message_id} 的记录 (group_id: {group_id}, user_id: {user_id})")
             return
-            
+
         # 记录反应
         try:
             # 检查用户是否已经对该消息有反应 - 使用上下文查找
             existing_reaction = ReactionRecord.get_by_context(group_id, user_id, message_id)
-            
+
             if is_removing:
                 # 如果是移除反应，删除记录
                 if existing_reaction:
@@ -458,12 +458,12 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         emoji=emoji
                     )
                     logger.info(f"已记录用户 {user_id} 对论文 {record.arxiv_id} 的反应: {emoji}")
-                
+
         except Exception as e:
             logger.error(f"记录反应时出错: {str(e)}")
             import traceback
             logger.error(f"堆栈跟踪: {traceback.format_exc()}")
-            
+
     except Exception as e:
         logger.error(f"处理反应时出错: {str(e)}")
         import traceback
@@ -502,20 +502,26 @@ async def run():
 
     import fcntl
     # import sys # sys is already imported at the top
-    
+
     logger.info("Starting Telegram Bot...")
-    
+
     # 确保broker启动前已设置详细日志
     logger.debug("Broker startup")
     logger.debug("Broker startup complete")
-    
+
     await application.initialize()
     logger.debug("Application initialized")
     await application.start()
     logger.debug("Application started")
 
+    # Start the scheduler
+    try:
+        start_scheduler(application)
+        logger.info("Scheduler started successfully")
+    except Exception as e:
+        logger.error(f"Failed to start scheduler: {e}")
+        # Continue without scheduler - manual recommendations will still work
 
-                
     # 然后测试实际的任务
     logger.debug("尝试提交正式 upsert_pat 任务...")
     a = await upsert_pat("test_user", "test_token")
@@ -529,7 +535,7 @@ async def run():
     except IOError:
         logger.error("Another instance of the bot is already running. Exiting.")
         sys.exit(1)
-        
+
     # Add command handlers
     # 添加正确且合适的handlers，包括reaction
     application.add_handler(CommandHandler("start", start))
@@ -545,12 +551,19 @@ async def run():
     await set_bot_commands(application.bot)
 
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-    
+
     try:
         while True:
             await asyncio.sleep(1)  # 每小时检查一次，保持循环运行
     except KeyboardInterrupt:
         logger.info("Shutting down bot...")
+        # Shutdown scheduler first
+        try:
+            shutdown_scheduler()
+            logger.info("Scheduler shutdown completed")
+        except Exception as e:
+            logger.error(f"Error shutting down scheduler: {e}")
+
         # 优雅地停止 bot
         await application.updater.stop()
         await application.stop()
