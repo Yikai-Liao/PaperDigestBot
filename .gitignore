@@ -6,3 +6,12 @@
 **/bot.db
 
 .env
+
+# Coverage reports
+htmlcov/
+coverage.xml
+.coverage
+
+pg_data
+.ruff_cache
+.pytest_cache

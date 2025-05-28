@@ -1,38 +1,37 @@
+import os
+import sys
 from logging.config import fileConfig
+from pathlib import Path
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool
 
 from alembic import context
-
-import sys
-import os
-from pathlib import Path
-from dotenv import load_dotenv
 
 # 获取项目根目录路径
 REPO_DIR = Path(__file__).resolve().parent.parent
 # 加载环境变量
-load_dotenv(REPO_DIR / '.env')
+load_dotenv(REPO_DIR / ".env")
 # 将 src 目录添加到 Python 路径中
 sys.path.append(str(REPO_DIR))
 
-from src.models.user_setting import UserSetting
-from src.models.base import Base
+from src.models.base import BaseModel
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
+
 # 从环境变量构建数据库连接字符串
 def get_database_url():
     """从环境变量获取数据库连接字符串"""
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    user = os.getenv("POSTGRES_USER", "postgres")
-    password = os.getenv("POSTGRES_PASSWORD", "postgres")
-    database = os.getenv("POSTGRES_DB", "postgres")
+    host = os.getenv("DATABASE__HOST", "localhost")
+    port = os.getenv("DATABASE__PORT", "5432")
+    user = os.getenv("DATABASE__USER", "postgres")
+    password = os.getenv("DATABASE__PASSWORD", "root")
+    database = os.getenv("DATABASE__DATABASE", "paper_digest")
     return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
 
 # 设置数据库连接字符串
 config.set_main_option("sqlalchemy.url", get_database_url())
@@ -46,7 +45,7 @@ if config.config_file_name is not None:
 # for 'autogenerate' support
 # from myapp import mymodel
 # target_metadata = mymodel.Base.metadata
-target_metadata = Base.metadata
+target_metadata = BaseModel.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -92,9 +91,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(
-            connection=connection, target_metadata=target_metadata
-        )
+        context.configure(connection=connection, target_metadata=target_metadata)
 
         with context.begin_transaction():
             context.run_migrations()

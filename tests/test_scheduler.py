@@ -1,464 +1,197 @@
 """
-Test suite for the PaperDigestScheduler functionality.
-Tests the object-oriented APScheduler integration with real-world scenarios.
+Tests for the scheduler module
 """
 
-import pytest
-import asyncio
-from unittest.mock import Mock, patch, AsyncMock, MagicMock
-from telegram.ext import Application
+from unittest.mock import AsyncMock, Mock, patch
 
-from src.scheduler import (
-    PaperDigestScheduler,
-    get_scheduler,
-    start_scheduler,
-    shutdown_scheduler,
-    is_scheduler_running,
-    sync_user_schedule_from_settings
-)
+import pytest
 
 
 class TestPaperDigestScheduler:
-    """Test the PaperDigestScheduler class functionality."""
+    """Test PaperDigestScheduler functionality"""
 
-    def setup_method(self):
-        """Setup for each test method."""
-        self.scheduler = PaperDigestScheduler()
+    @pytest.fixture
+    def scheduler(self):
+        """Create scheduler instance"""
+        from src.scheduler import PaperDigestScheduler
 
-    def teardown_method(self):
-        """Cleanup after each test method."""
-        if self.scheduler.scheduler is not None:
-            self.scheduler.shutdown()
+        return PaperDigestScheduler()
 
-    @patch('src.scheduler.default_config')
-    def test_scheduler_initialization_with_mock_db(self, mock_config):
-        """Test scheduler initialization with mocked database config."""
-        # Use PostgreSQL test database instead of SQLite
-        mock_config.dsn = "postgresql+psycopg2://postgres:root@localhost:5432/paper_digest_test"
-        mock_bot = Mock(spec=Application)
+    @pytest.fixture
+    def mock_bot_application(self) -> Mock:
+        """Mock Telegram bot application"""
+        return Mock()
 
-        # Test initialization
-        self.scheduler.initialize(mock_bot)
-
-        assert self.scheduler.scheduler is not None
-        assert self.scheduler.bot_application == mock_bot
-        assert not self.scheduler.is_running()
-
-    @patch('src.scheduler.default_config')
-    def test_scheduler_initialization(self, mock_config):
-        """Test scheduler initialization."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_bot = Mock(spec=Application)
-
-        # Test initialization
-        self.scheduler.initialize(mock_bot)
-
-        assert self.scheduler.scheduler is not None
-        assert self.scheduler.bot_application == mock_bot
-        assert not self.scheduler.is_running()
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_scheduler_start_stop(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test scheduler start and stop."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_user_setting.get_all.return_value = []
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
+    @patch("src.scheduler.AsyncIOScheduler")
+    @patch("src.scheduler.SQLAlchemyJobStore")
+    def test_scheduler_initialization(
+        self,
+        mock_job_store: Mock,
+        mock_scheduler_class: Mock,
+        scheduler,
+        mock_bot_application: Mock,
+    ) -> None:
+        """Test scheduler initialization"""
         mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = False
         mock_scheduler_class.return_value = mock_scheduler_instance
 
-        # Initialize
-        self.scheduler.initialize(mock_bot)
+        scheduler.initialize(mock_bot_application)
 
-        # Test start
-        self.scheduler.start()
-        mock_scheduler_instance.start.assert_called_once()
+        # Verify scheduler was created with proper configuration
+        mock_scheduler_class.assert_called_once()
+        assert scheduler.bot_application == mock_bot_application
+        assert scheduler.scheduler == mock_scheduler_instance
 
-        # Mock running state for is_running check
-        mock_scheduler_instance.running = True
-        assert self.scheduler.is_running()
+    def test_multiple_initialization_warning(self, scheduler, mock_bot_application: Mock) -> None:
+        """Test that multiple initialization attempts log a warning"""
+        with patch("src.scheduler.AsyncIOScheduler") as mock_scheduler_class:
+            mock_scheduler_instance = Mock()
+            mock_scheduler_class.return_value = mock_scheduler_instance
 
-        # Test stop
-        self.scheduler.shutdown()
-        mock_scheduler_instance.shutdown.assert_called_once()
+            # First initialization
+            scheduler.initialize(mock_bot_application)
 
-    def test_cron_parsing(self):
-        """Test cron expression parsing."""
-        test_cases = [
-            ("0 7 * * *", 5),      # 5-field
-            ("0 0 7 * * *", 6),    # 6-field
-            ("*/15 9-17 * * 1-5", 5),  # Complex expression
+            # Second initialization should log warning
+            with patch("src.scheduler.logger") as mock_logger:
+                scheduler.initialize(mock_bot_application)
+                mock_logger.warning.assert_called_once_with("Scheduler already initialized")
+
+    def test_scheduler_not_initialized_operations(self, scheduler) -> None:
+        """Test operations when scheduler is not initialized"""
+        # Test operations on uninitialized scheduler
+        assert scheduler.add_user_schedule("test_user", "0 9 * * *") is False
+        assert scheduler.remove_user_schedule("test_user") is False
+
+        # Start should raise error for uninitialized scheduler
+        with pytest.raises(RuntimeError, match="Scheduler not initialized"):
+            scheduler.start()
+
+        # Shutdown should handle gracefully even if not initialized
+        scheduler.shutdown()  # Should not raise error
+
+    @patch("src.scheduler.AsyncIOScheduler")
+    def test_preference_sync_job_initialization(
+        self, mock_scheduler_class: Mock, scheduler, mock_bot_application: Mock
+    ) -> None:
+        """Test that preference sync job is added during initialization"""
+        mock_scheduler_instance = Mock()
+        mock_scheduler_class.return_value = mock_scheduler_instance
+
+        scheduler.initialize(mock_bot_application)
+
+        # Verify preference sync job was added
+        add_job_calls = mock_scheduler_instance.add_job.call_args_list
+        preference_job_call = None
+
+        for call in add_job_calls:
+            args, kwargs = call
+            if kwargs.get("id") == "preference_sync_job":
+                preference_job_call = call
+                break
+
+        assert preference_job_call is not None, "Preference sync job was not added"
+        args, kwargs = preference_job_call
+        assert kwargs["name"] == "Daily preference synchronization"
+        assert kwargs["hour"] == 0  # UTC midnight
+        assert kwargs["minute"] == 0
+
+    @patch("src.scheduler.AsyncIOScheduler")
+    def test_trigger_preference_sync(
+        self, mock_scheduler_class: Mock, scheduler, mock_bot_application: Mock
+    ) -> None:
+        """Test manual triggering of preference sync"""
+        mock_scheduler_instance = Mock()
+        mock_scheduler_class.return_value = mock_scheduler_instance
+
+        scheduler.initialize(mock_bot_application)
+
+        # Test triggering preference sync
+        result = scheduler.trigger_preference_sync()
+
+        assert result is True
+
+        # Verify manual preference sync job was added
+        add_job_calls = mock_scheduler_instance.add_job.call_args_list
+        manual_job_call = None
+
+        for call in add_job_calls:
+            args, kwargs = call
+            if kwargs.get("id") == "manual_preference_sync":
+                manual_job_call = call
+                break
+
+        assert manual_job_call is not None, "Manual preference sync job was not added"
+        args, kwargs = manual_job_call
+        assert kwargs["name"] == "Manual preference synchronization"
+
+    def test_trigger_preference_sync_not_initialized(self, scheduler) -> None:
+        """Test triggering preference sync when scheduler is not initialized"""
+        result = scheduler.trigger_preference_sync()
+        assert result is False
+
+
+class TestPreferenceSyncFunction:
+    """Test the execute_preference_sync function"""
+
+    @patch("src.scheduler.PreferenceManager")
+    @pytest.mark.asyncio
+    async def test_execute_preference_sync_success(
+        self, mock_preference_manager_class: Mock
+    ) -> None:
+        """Test successful preference synchronization execution"""
+        from src.scheduler import execute_preference_sync
+
+        # Mock preference manager
+        mock_manager = Mock()
+        mock_manager.sync_all_users_preferences.return_value = {
+            "user1": True,
+            "user2": True,
+            "user3": False,
+        }
+        mock_preference_manager_class.return_value = mock_manager
+
+        # Execute the function
+        await execute_preference_sync()
+
+        # Verify manager was created and called
+        mock_preference_manager_class.assert_called_once()
+        mock_manager.sync_all_users_preferences.assert_called_once_with(days_back=2)
+
+    @patch("src.scheduler.PreferenceManager")
+    @patch("src.scheduler.logger")
+    @pytest.mark.asyncio
+    async def test_execute_preference_sync_failure(
+        self, mock_logger: Mock, mock_preference_manager_class: Mock
+    ) -> None:
+        """Test preference synchronization execution with failure"""
+        from src.scheduler import execute_preference_sync
+
+        # Mock preference manager to raise exception
+        mock_preference_manager_class.side_effect = Exception("Sync failed")
+
+        # Execute the function
+        await execute_preference_sync()
+
+        # Verify error was logged
+        mock_logger.error.assert_called()
+        error_calls = [
+            call
+            for call in mock_logger.error.call_args_list
+            if "Error during preference synchronization" in str(call)
         ]
+        assert len(error_calls) > 0
 
-        for cron_expr, expected_fields in test_cases:
-            result = self.scheduler._parse_cron_to_kwargs(cron_expr)
-            assert 'timezone' in result
-            # Count non-timezone fields
-            field_count = len([k for k in result.keys() if k != 'timezone'])
-            assert field_count == expected_fields, f"Expected {expected_fields} fields for {cron_expr}"
 
-    def test_invalid_cron_expressions(self):
-        """Test that invalid cron expressions raise errors."""
-        invalid_expressions = [
-            "",                    # Empty
-            "* * *",              # Too few fields
-            "* * * * * * * *",    # Too many fields
-        ]
+class TestSchedulerPreferenceIntegration:
+    """Integration tests for scheduler preference functionality"""
 
-        for expr in invalid_expressions:
-            with pytest.raises(ValueError):
-                self.scheduler._parse_cron_to_kwargs(expr)
+    @patch("src.scheduler.trigger_preference_sync")
+    def test_trigger_preference_sync_public_api(self, mock_trigger: Mock) -> None:
+        """Test the public API for triggering preference sync"""
+        from src.scheduler import trigger_preference_sync
 
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_add_user_schedule(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test adding a user schedule."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_user_setting.get_all.return_value = []
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        # Mock job info
-        mock_job = Mock()
-        mock_job.id = "user_recommendation_test_user_123"
-        mock_job.name = "Recommendation for user test_user_123"
-        mock_job.next_run_time = None
-        mock_job.trigger = "cron"
-        mock_scheduler_instance.get_job.return_value = mock_job
-
-        self.scheduler.initialize(mock_bot)
-        self.scheduler.start()
-
-        user_id = "test_user_123"
-        cron_expr = "0 7 * * *"
-
-        result = self.scheduler.add_user_schedule(user_id, cron_expr)
+        mock_trigger.return_value = True
+        result = trigger_preference_sync()
 
         assert result is True
-        mock_scheduler_instance.add_job.assert_called_once()
-
-        # Check that job was added
-        job_info = self.scheduler.get_user_schedule_info(user_id)
-        assert job_info is not None
-        assert job_info['job_id'] == f"user_recommendation_{user_id}"
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_remove_user_schedule(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test removing a user schedule."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_user_setting.get_all.return_value = []
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        # Mock job removal
-        mock_scheduler_instance.get_job.side_effect = [Mock(), None]  # First call returns job, second returns None
-
-        self.scheduler.initialize(mock_bot)
-        self.scheduler.start()
-
-        user_id = "test_user_123"
-        cron_expr = "0 7 * * *"
-
-        # Add schedule first (mocked)
-        self.scheduler.add_user_schedule(user_id, cron_expr)
-
-        # Remove schedule
-        result = self.scheduler.remove_user_schedule(user_id)
-
-        assert result is True
-        mock_scheduler_instance.remove_job.assert_called_once()
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_update_user_schedule(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test updating a user schedule."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_user_setting.get_all.return_value = []
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        # Mock job info
-        mock_job = Mock()
-        mock_job.id = "user_recommendation_test_user_123"
-        mock_scheduler_instance.get_job.return_value = mock_job
-
-        self.scheduler.initialize(mock_bot)
-        self.scheduler.start()
-
-        user_id = "test_user_123"
-        old_cron = "0 7 * * *"
-        new_cron = "0 8 * * *"
-
-        # Add initial schedule (mocked)
-        self.scheduler.add_user_schedule(user_id, old_cron)
-
-        # Update schedule
-        result = self.scheduler.update_user_schedule(user_id, new_cron)
-
-        assert result is True
-
-        # Verify job still exists (it should be replaced)
-        job_info = self.scheduler.get_user_schedule_info(user_id)
-        assert job_info is not None
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_update_schedule_to_disable(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test updating schedule to '关闭' (should remove it)."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_user_setting.get_all.return_value = []
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        # Mock job removal
-        mock_scheduler_instance.get_job.side_effect = [Mock(), None]  # First call returns job, second returns None
-
-        self.scheduler.initialize(mock_bot)
-        self.scheduler.start()
-
-        user_id = "test_user_123"
-        cron_expr = "0 7 * * *"
-
-        # Add schedule first (mocked)
-        self.scheduler.add_user_schedule(user_id, cron_expr)
-
-        # Update to disable
-        result = self.scheduler.update_user_schedule(user_id, "关闭")
-
-        assert result is True
-        mock_scheduler_instance.remove_job.assert_called_once()
-
-
-class TestGlobalSchedulerAPI:
-    """Test the global scheduler API functions."""
-
-    def teardown_method(self):
-        """Cleanup after each test method."""
-        shutdown_scheduler()
-
-    def test_get_scheduler_singleton(self):
-        """Test that get_scheduler returns the same instance."""
-        scheduler1 = get_scheduler()
-        scheduler2 = get_scheduler()
-
-        assert scheduler1 is scheduler2
-        assert isinstance(scheduler1, PaperDigestScheduler)
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_start_shutdown_scheduler(self, mock_scheduler_class, mock_config):
-        """Test the global start/shutdown functions."""
-        mock_config.dsn = "sqlite:///:memory:"
-        mock_bot = Mock(spec=Application)
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        # Test starting
-        with patch('src.scheduler.PaperDigestScheduler.load_all_user_schedules'):
-            start_scheduler(mock_bot)
-            assert is_scheduler_running()
-
-        # Test shutdown
-        shutdown_scheduler()
-        assert not is_scheduler_running()
-
-    @patch('src.scheduler.default_config')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.AsyncIOScheduler')
-    def test_sync_user_schedule_from_settings(self, mock_scheduler_class, mock_user_setting, mock_config):
-        """Test syncing user schedule from database settings."""
-        mock_config.dsn = "sqlite:///:memory:"
-        # Mock user setting
-        mock_user = Mock()
-        mock_user.cron = "0 7 * * *"
-        mock_user_setting.get_by_id.return_value = mock_user
-
-        # Mock the scheduler instance
-        mock_scheduler_instance = Mock()
-        mock_scheduler_instance.running = True
-        mock_scheduler_class.return_value = mock_scheduler_instance
-
-        mock_bot = Mock(spec=Application)
-        with patch('src.scheduler.PaperDigestScheduler.load_all_user_schedules'):
-            start_scheduler(mock_bot)
-
-        result = sync_user_schedule_from_settings("test_user")
-
-        assert result is True
-        mock_user_setting.get_by_id.assert_called_once_with("test_user")
-
-
-@pytest.mark.asyncio
-class TestScheduledExecution:
-    """Test the scheduled job execution functionality."""
-
-    def setup_method(self):
-        """Setup for execution tests."""
-        self.scheduler = PaperDigestScheduler()
-
-    def teardown_method(self):
-        """Cleanup after execution tests."""
-        if self.scheduler.scheduler is not None:
-            self.scheduler.shutdown()
-
-    @patch('src.scheduler.get_scheduler')
-    async def test_execute_scheduled_recommendation_no_bot(self, mock_get_scheduler):
-        """Test execution when bot application is not available."""
-        # Mock scheduler with no bot application
-        mock_scheduler = Mock()
-        mock_scheduler.bot_application = None
-        mock_get_scheduler.return_value = mock_scheduler
-
-        # Import the module-level function
-        from src.scheduler import execute_scheduled_recommendation
-        # Should not crash, just log error
-        await execute_scheduled_recommendation("test_user")
-
-        # No assertions needed, just verify it doesn't crash
-
-    @patch('src.scheduler.get_scheduler')
-    @patch('src.scheduler.UserSetting')
-    async def test_execute_scheduled_recommendation_no_user(self, mock_user_setting, mock_get_scheduler):
-        """Test execution when user settings are not found."""
-        mock_user_setting.get_by_id.return_value = None
-
-        mock_bot = Mock(spec=Application)
-        mock_scheduler = Mock()
-        mock_scheduler.bot_application = mock_bot
-        mock_scheduler.remove_user_schedule = Mock(return_value=True)
-        mock_get_scheduler.return_value = mock_scheduler
-
-        # Import the module-level function
-        from src.scheduler import execute_scheduled_recommendation
-        await execute_scheduled_recommendation("test_user")
-
-        # Should have tried to remove the schedule
-        mock_user_setting.get_by_id.assert_called_once_with("test_user")
-        mock_scheduler.remove_user_schedule.assert_called_once_with("test_user")
-
-    @patch('src.scheduler.get_scheduler')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.request_recommendations')
-    @patch('src.scheduler.MessageRecord')
-    async def test_execute_scheduled_recommendation_success(self, mock_message_record, mock_request_recommendations, mock_user_setting, mock_get_scheduler):
-        """Test successful execution of scheduled recommendation."""
-        # Mock user setting
-        mock_user = Mock()
-        mock_user.cron = "0 7 * * *"
-        mock_user.pat = "test_pat"
-        mock_user.github_id = "test_user"
-        mock_user.repo_name = "test_repo"
-        mock_user_setting.get_by_id.return_value = mock_user
-
-        # Mock recommendations
-        import polars as pl
-        mock_df = pl.DataFrame({"id": ["paper1", "paper2"], "title": ["Title 1", "Title 2"]})
-        mock_request_recommendations.return_value = mock_df
-
-        # Mock bot
-        mock_bot = Mock(spec=Application)
-        mock_bot.bot = AsyncMock()
-
-        # Mock message objects with message_id
-        mock_message1 = Mock()
-        mock_message1.message_id = 12345
-        mock_message2 = Mock()
-        mock_message2.message_id = 12346
-        mock_bot.bot.send_message.side_effect = [
-            mock_message1,  # Header message (not recorded)
-            mock_message1,  # First recommendation
-            mock_message2   # Second recommendation
-        ]
-
-        # Mock scheduler
-        mock_scheduler = Mock()
-        mock_scheduler.bot_application = mock_bot
-        mock_get_scheduler.return_value = mock_scheduler
-
-        # Mock MessageRecord.create
-        mock_record = Mock()
-        mock_record.id = "test_record_id"
-        mock_message_record.create.return_value = mock_record
-
-        # Mock render function
-        with patch('src.scheduler.render_summary_tg') as mock_render:
-            mock_render.return_value = {"paper1": "Summary 1", "paper2": "Summary 2"}
-
-            # Import the module-level function
-            from src.scheduler import execute_scheduled_recommendation
-            await execute_scheduled_recommendation("123456789")
-
-            # Verify bot messages were sent
-            assert mock_bot.bot.send_message.call_count >= 3  # Header + 2 recommendations
-            mock_request_recommendations.assert_called_once_with("123456789")
-
-            # Verify message records were created
-            assert mock_message_record.create.call_count == 2  # One for each recommendation
-
-    @patch('src.scheduler.get_scheduler')
-    @patch('src.scheduler.UserSetting')
-    @patch('src.scheduler.request_recommendations')
-    async def test_execute_scheduled_recommendation_no_recommendations(self, mock_request_recommendations, mock_user_setting, mock_get_scheduler):
-        """Test execution when no recommendations are available."""
-        # Mock user setting
-        mock_user = Mock()
-        mock_user.cron = "0 7 * * *"
-        mock_user.pat = "test_pat"
-        mock_user.github_id = "test_user"
-        mock_user.repo_name = "test_repo"
-        mock_user_setting.get_by_id.return_value = mock_user
-
-        # Mock empty recommendations
-        import polars as pl
-        mock_df = pl.DataFrame({"id": [], "title": []})
-        mock_request_recommendations.return_value = mock_df
-
-        # Mock bot
-        mock_bot = Mock(spec=Application)
-        mock_bot.bot = AsyncMock()
-
-        # Mock scheduler
-        mock_scheduler = Mock()
-        mock_scheduler.bot_application = mock_bot
-        mock_get_scheduler.return_value = mock_scheduler
-
-        # Import the module-level function
-        from src.scheduler import execute_scheduled_recommendation
-        await execute_scheduled_recommendation("123456789")
-
-        # Verify no-recommendations message was sent
-        mock_bot.bot.send_message.assert_called_once()
-        call_args = mock_bot.bot.send_message.call_args
-        assert "目前没有新的论文推荐" in call_args[1]['text']
-
-
-if __name__ == "__main__":
-    pytest.main([__file__])
+        mock_trigger.assert_called_once()

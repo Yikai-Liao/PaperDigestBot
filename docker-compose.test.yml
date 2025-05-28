@@ -1,0 +1,33 @@
+services:
+  test-postgres:
+    image: postgres:15
+    container_name: paper-digest-test-postgres
+    environment:
+      POSTGRES_DB: test_paper_digest
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d test_paper_digest"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: "no"
+
+  redis-test:
+    image: redis:7-alpine
+    container_name: paper-digest-test-redis
+    ports:
+      - "6380:6379"
+    tmpfs:
+      - /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: "no"

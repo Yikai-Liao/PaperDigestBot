@@ -1,22 +1,34 @@
-import aiohttp
 import asyncio
-import os
-from datetime import datetime, timedelta, timezone
-import zipfile
 import io
-import tempfile
-from loguru import logger
+import os
 import shutil
+import tempfile
+import zipfile
+from datetime import UTC, datetime, timedelta
 
-async def trigger_workflow(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, workflow_file: str, branch: str, inputs: dict = None):
+import aiohttp
+from loguru import logger
+
+
+async def trigger_workflow(
+    session: aiohttp.ClientSession,
+    pat: str,
+    owner: str,
+    repo: str,
+    workflow_file: str,
+    branch: str,
+    inputs: dict = None,
+):
     """
     异步触发 GitHub Actions 工作流
     """
-    url = f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches"
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}/actions/workflows/{workflow_file}/dispatches"
+    )
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {pat}",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
     payload = {"ref": branch, "inputs": inputs or {}}
 
@@ -29,7 +41,18 @@ async def trigger_workflow(session: aiohttp.ClientSession, pat: str, owner: str,
             logger.error(f"触发工作流失败，状态码: {response.status}，错误: {error_text}")
             return False
 
-async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, workflow_file: str, branch: str, trigger_time: datetime, max_attempts: int = 10, poll_interval: int = 2):
+
+async def get_triggered_workflow_run(
+    session: aiohttp.ClientSession,
+    pat: str,
+    owner: str,
+    repo: str,
+    workflow_file: str,
+    branch: str,
+    trigger_time: datetime,
+    max_attempts: int = 10,
+    poll_interval: int = 2,
+):
     """
     获取刚触发的运行 ID，通过工作流文件名、分支和触发时间过滤
     """
@@ -37,7 +60,7 @@ async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, o
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {pat}",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     for attempt in range(max_attempts):
@@ -48,7 +71,10 @@ async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, o
                     if (
                         run["path"] == f".github/workflows/{workflow_file}"
                         and run["head_branch"] == branch
-                        and datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) >= trigger_time
+                        and datetime.strptime(run["created_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                            tzinfo=UTC
+                        )
+                        >= trigger_time
                     ):
                         logger.info(f"找到触发的运行 ID: {run['id']}")
                         return run
@@ -59,11 +85,19 @@ async def get_triggered_workflow_run(session: aiohttp.ClientSession, pat: str, o
                 logger.error(f"获取运行列表失败，状态码: {response.status}，错误: {error_text}")
                 return None
         await asyncio.sleep(poll_interval)
-    
+
     logger.warning("未找到匹配的工作流运行，可能是触发延迟或配置错误")
     return None
 
-async def wait_for_workflow_completion(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, run_id: int, poll_interval: int = 20):
+
+async def wait_for_workflow_completion(
+    session: aiohttp.ClientSession,
+    pat: str,
+    owner: str,
+    repo: str,
+    run_id: int,
+    poll_interval: int = 20,
+):
     """
     等待工作流运行完成
     """
@@ -71,7 +105,7 @@ async def wait_for_workflow_completion(session: aiohttp.ClientSession, pat: str,
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {pat}",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     while True:
@@ -94,10 +128,19 @@ async def wait_for_workflow_completion(session: aiohttp.ClientSession, pat: str,
                 logger.error(f"检查工作流状态失败，状态码: {response.status}，错误: {error_text}")
                 return False
 
-async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str, repo: str, run_id: int, artifact_name: str, output_dir: str = None):
+
+async def download_artifact(
+    session: aiohttp.ClientSession,
+    pat: str,
+    owner: str,
+    repo: str,
+    run_id: int,
+    artifact_name: str,
+    output_dir: str = None,
+):
     """
     下载指定的 artifact 并直接解压到临时目录
-    
+
     Args:
         session: aiohttp会话
         pat: GitHub个人访问令牌
@@ -106,7 +149,7 @@ async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str
         run_id: 工作流运行ID
         artifact_name: artifact名称
         output_dir: 输出目录，如果为None则创建一个跨平台的临时目录
-        
+
     Returns:
         解压目录的路径，失败则返回None
     """
@@ -114,7 +157,7 @@ async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {pat}",
-        "X-GitHub-Api-Version": "2022-11-28"
+        "X-GitHub-Api-Version": "2022-11-28",
     }
 
     # 如果没有指定输出目录，创建一个跨平台的临时目录
@@ -131,19 +174,23 @@ async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str
                         if download_response.status == 200:
                             # 直接读取ZIP数据到内存
                             zip_data = await download_response.read()
-                            
+
                             # 从内存中解压ZIP数据到输出目录
                             try:
                                 with zipfile.ZipFile(io.BytesIO(zip_data)) as zip_ref:
                                     zip_ref.extractall(output_dir)
-                                logger.info(f"成功下载并解压 artifact: {artifact_name} 到 {output_dir}")
+                                logger.info(
+                                    f"成功下载并解压 artifact: {artifact_name} 到 {output_dir}"
+                                )
                                 return output_dir
                             except Exception as e:
                                 logger.error(f"解压artifact失败: {e}")
                                 return None
                         else:
                             error_text = await download_response.text()
-                            logger.error(f"下载 artifact 失败，状态码: {download_response.status}，错误: {error_text}")
+                            logger.error(
+                                f"下载 artifact 失败，状态码: {download_response.status}，错误: {error_text}"
+                            )
                             return None
             logger.warning(f"未找到 artifact: {artifact_name}")
             return None
@@ -151,6 +198,7 @@ async def download_artifact(session: aiohttp.ClientSession, pat: str, owner: str
             error_text = await response.text()
             logger.error(f"获取 artifact 列表失败，状态码: {response.status}，错误: {error_text}")
             return None
+
 
 async def run_workflow(
     pat: str,
@@ -166,20 +214,23 @@ async def run_workflow(
     """
     async with aiohttp.ClientSession() as session:
         # 1. 触发工作流并记录触发时间
-        trigger_time = datetime.now(timezone.utc) - timedelta(seconds=10)
+        trigger_time = datetime.now(UTC) - timedelta(seconds=10)
         if not await trigger_workflow(session, pat, owner, repo, workflow_file, branch, inputs):
             return None
         # 2. 获取刚触发的运行
-        run = await get_triggered_workflow_run(session, pat, owner, repo, workflow_file, branch, trigger_time)
+        run = await get_triggered_workflow_run(
+            session, pat, owner, repo, workflow_file, branch, trigger_time
+        )
         if not run:
             return None
         # 3. 等待工作流完成
         if not await wait_for_workflow_completion(session, pat, owner, repo, run["id"]):
             return None
-        
+
         # 4. 下载artifact并直接解压到临时目录（优化IO：直接内存解压）
         temp_dir = await download_artifact(session, pat, owner, repo, run["id"], artifact_name)
         return temp_dir
+
 
 if __name__ == "__main__":
     PAT = ""  # 替换为你的 Personal Access Token
@@ -189,9 +240,12 @@ if __name__ == "__main__":
     BRANCH = "main"  # 替换为分支名称
     INPUTS = {}  # 可选：工作流输入参数
     ARTIFACT_NAME = "summarized"
-    temp_dir = asyncio.run(run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME))
+    temp_dir = asyncio.run(
+        run_workflow(PAT, OWNER, REPO, WORKFLOW_FILE, BRANCH, INPUTS, ARTIFACT_NAME)
+    )
     logger.info(f"Workflow returned temp_dir: {temp_dir}")
     import polars as pl
+
     if temp_dir and os.path.exists(temp_dir):
         try:
             parquet_path = os.path.join(temp_dir, "summarized.parquet")
@@ -202,10 +256,12 @@ if __name__ == "__main__":
         except Exception as e:
             logger.error(f"读取parquet文件失败: {e}", exc_info=True)
     elif temp_dir:
-        logger.warning(f"Temporary directory {temp_dir} was specified but does not exist for Parquet reading.")
+        logger.warning(
+            f"Temporary directory {temp_dir} was specified but does not exist for Parquet reading."
+        )
     else:
         logger.warning("Workflow did not return a temporary directory. Cannot read Parquet.")
-    
+
     # 运行完后，删除临时目录
     if temp_dir and os.path.exists(temp_dir):
         try:

@@ -1,5 +1,10 @@
+# Telegram configuration - use environment variables
+# [telegram]
+# token = ""
+
+# Security configuration - use environment variables
+# [security]
+# encryption_key = ""
+
 [telegram]
-token=""
-[pat]
-key = "pat/key.bin"
-db_path = "pat/db.sqlite"
+reaction_mapping = { like = ["👍", "♥️", "🔥", "💯"], dislike = ["👎", "💔", "😕"], neutral = ["🤔", "😐", "😶"] }

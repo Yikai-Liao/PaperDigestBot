@@ -4,7 +4,6 @@ Manual test script for the scheduler functionality.
 This script allows manual testing of scheduler operations without requiring a full bot setup.
 """
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -12,16 +11,17 @@ from pathlib import Path
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_DIR))
 
-from src.scheduler import (
-    start_scheduler,
-    shutdown_scheduler,
-    parse_cron_expression,
-    add_user_schedule,
-    remove_user_schedule,
-    get_user_schedule_info,
-    is_scheduler_running
-)
 from loguru import logger
+
+from src.scheduler import (
+    add_user_schedule,
+    get_user_schedule_info,
+    is_scheduler_running,
+    parse_cron_expression,
+    remove_user_schedule,
+    shutdown_scheduler,
+    start_scheduler,
+)
 
 
 def test_cron_parsing():
@@ -77,7 +77,9 @@ def test_scheduler_lifecycle():
         # Test getting job info
         info = get_user_schedule_info("test_user")
         if info:
-            logger.info(f"✓ User schedule info: {info['job_id']}, next run: {info['next_run_time']}")
+            logger.info(
+                f"✓ User schedule info: {info['job_id']}, next run: {info['next_run_time']}"
+            )
         else:
             logger.warning("No schedule info found (expected if no database)")
 
@@ -110,7 +112,7 @@ def interactive_test():
 
     try:
         while True:
-            print("\n" + "="*50)
+            print("\n" + "=" * 50)
             print("Scheduler Test Menu:")
             print("1. Add user schedule")
             print("2. Remove user schedule")
@@ -118,7 +120,7 @@ def interactive_test():
             print("4. Test cron parsing")
             print("5. List all jobs")
             print("6. Exit")
-            print("="*50)
+            print("=" * 50)
 
             choice = input("Enter your choice (1-6): ").strip()
 
@@ -154,6 +156,7 @@ def interactive_test():
 
             elif choice == "5":
                 from src.scheduler import scheduler_manager
+
                 if scheduler_manager.scheduler:
                     jobs = scheduler_manager.scheduler.get_jobs()
                     if jobs:
@@ -187,7 +190,7 @@ def main():
 
         tests = [
             ("Cron Parsing", test_cron_parsing),
-            ("Scheduler Lifecycle", test_scheduler_lifecycle)
+            ("Scheduler Lifecycle", test_scheduler_lifecycle),
         ]
 
         passed = 0
@@ -206,7 +209,7 @@ def main():
                 logger.error(f"✗ {test_name} test failed with exception: {e}")
                 failed += 1
 
-        logger.info(f"\n--- Test Results ---")
+        logger.info("\n--- Test Results ---")
         logger.info(f"Passed: {passed}")
         logger.info(f"Failed: {failed}")
 

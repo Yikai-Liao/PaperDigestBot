@@ -6,57 +6,86 @@ This module implements the Telegram Bot functionality using the python-telegram-
 It handles user interactions, communicates with the Dispatcher, and formats responses for Telegram.
 """
 
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, MessageReactionHandler
-from loguru import logger
+import asyncio  # Added for database initialization
+import atexit  # Ensure atexit is imported
+import os  # Ensure os is imported
+import sys  # Ensure sys is imported if REPO_DIR logic uses it
 from pathlib import Path
-import sys # Ensure sys is imported if REPO_DIR logic uses it
-import os # Ensure os is imported
-import asyncio # Added for database initialization
-import atexit # Ensure atexit is imported
+
+from loguru import logger
+from telegram import BotCommand, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageReactionHandler,
+)
 
 REPO_DIR = Path(__file__).resolve().parent.parent.parent
 # add the src directory to the Python path
 sys.path.append(str(REPO_DIR))
 
-from src.dispatcher import *
-from src.render import render_summary_tg
-from src.models.message_record import MessageRecord
-from src.models import BaseModel, UserSetting, ReactionRecord
-from src.scheduler import start_scheduler, shutdown_scheduler # Removed add_user_schedule as it's not used directly here
 from concurrent.futures import ProcessPoolExecutor
 
 # Added for database initialization
-from sqlalchemy import inspect, text
-from src.db import db # Assuming db is the Database instance from src.db
+from src.db import db  # Assuming db is the Database instance from src.db
+from src.dispatcher import *
+from src.models import ReactionRecord, UserSetting
+from src.models.message_record import MessageRecord
+from src.render import render_summary_tg
+from src.scheduler import (  # Removed add_user_schedule as it's not used directly here
+    shutdown_scheduler,
+    start_scheduler,
+)
 
 global_pool = ProcessPoolExecutor(max_workers=4)
 atexit.register(global_pool.shutdown)
+
 
 async def run_in_global_pool(func, *args):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(global_pool, func, *args)
 
-# Load configuration from environment variables
-import os
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+# Load configuration from config system
+from src.config import get_config
 
-if not TELEGRAM_TOKEN and not os.getenv('TEST_MODE', 'false').lower() == 'true':
-    logger.error("Telegram API token not found in environment. Please set TELEGRAM_BOT_TOKEN in .env file")
-    raise ValueError("Telegram API token is required")
+try:
+    config = get_config()
+    TELEGRAM_TOKEN = config.telegram.token
 
-# Initialize the Telegram Application only if not in test mode
-if os.getenv('TEST_MODE', 'false').lower() != 'true':
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-else:
-    application = None  # Will be mocked in tests
+    if not TELEGRAM_TOKEN and not config.app.test_mode:
+        logger.error(
+            "Telegram API token not found in config. Please set TELEGRAM__TOKEN in .env file"
+        )
+        raise ValueError("Telegram API token is required")
+
+    # Initialize the Telegram Application only if not in test mode
+    if not config.app.test_mode:
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+    else:
+        application = None  # Will be mocked in tests
+
+except Exception as e:
+    logger.error(f"Failed to load configuration: {e}")
+    # Fallback to old method for backwards compatibility
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+    if not TELEGRAM_TOKEN and not os.getenv("TEST_MODE", "false").lower() == "true":
+        logger.error("Telegram API token not found. Please set TELEGRAM__TOKEN in .env file")
+        raise ValueError("Telegram API token is required")
+
+    if os.getenv("TEST_MODE", "false").lower() != "true":
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+    else:
+        application = None
 
 # 设置自定义命令菜单
 # from telegram import BotCommand # Already imported
+
 
 async def set_bot_commands(bot):
     """设置 Telegram 机器人的自定义命令菜单"""
@@ -66,9 +95,11 @@ async def set_bot_commands(bot):
         # BotCommand("digest", "获取指定论文摘要"),
         # BotCommand("similar", "查找相似论文"),
         BotCommand("setting", "配置偏好"),
+        BotCommand("sync", "同步偏好数据到GitHub"),
     ]
     await bot.set_my_commands(commands)
     logger.info("自定义命令菜单已设置")
+
 
 # Handler for start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -83,10 +114,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "- 使用 /recommend 获取论文推荐\n"
         # "- 使用 /digest 获取指定论文的摘要\n"
         # "- 使用 /similar 查找相似论文\n"
-        "- 使用 /setting 配置您的偏好\n\n"
+        "- 使用 /setting 配置您的偏好\n"
+        "- 使用 /sync 手动同步偏好数据到GitHub\n\n"
         "请随时发送 Arxiv ID 列表或使用上述命令与我互动！"
     )
     await update.message.reply_text(welcome_message)
+
 
 def format_pat_safely(pat: str) -> str:
     """
@@ -107,6 +140,7 @@ def format_pat_safely(pat: str) -> str:
 
     # 显示开头4位和结尾4位，中间用**替代
     return pat[:8] + "**" + pat[-8:]
+
 
 async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=False):
     """
@@ -132,6 +166,7 @@ async def setting(update: Update, context: ContextTypes.DEFAULT_TYPE, initial=Fa
     if initial:
         settings_message = "首次设置：\n" + settings_message
     await update.message.reply_markdown(settings_message)
+
 
 async def check_user_settings(user_id: str) -> tuple[bool, str]:
     """
@@ -163,9 +198,14 @@ async def check_user_settings(user_id: str) -> tuple[bool, str]:
         logger.error(f"检查用户设置时出错: {e}")
         return False, "检查用户设置时出错，请稍后再试或联系管理员。"
 
+
 def record_messages(send_results, update: Update, recommendations: pl.DataFrame):
     user_id = str(update.effective_user.id)
-    group_id = str(update.effective_chat.id) if update.effective_chat.type in ['group', 'supergroup'] else None
+    group_id = (
+        str(update.effective_chat.id)
+        if update.effective_chat.type in ["group", "supergroup"]
+        else None
+    )
     user_setting = UserSetting.get_by_id(user_id)
     if not user_setting:
         logger.error(f"User {user_id} settings not found")
@@ -173,7 +213,7 @@ def record_messages(send_results, update: Update, recommendations: pl.DataFrame)
 
     logger.info(f"找到用户设置 - 仓库名: {user_setting.repo_name}")
 
-    for result, arxiv_id in zip(send_results, recommendations['id']):
+    for result, arxiv_id in zip(send_results, recommendations["id"], strict=False):
         try:
             record = MessageRecord.create(
                 group_id=group_id,
@@ -182,11 +222,16 @@ def record_messages(send_results, update: Update, recommendations: pl.DataFrame)
                 arxiv_id=arxiv_id,
                 repo_name=user_setting.repo_name,
             )
-            logger.info(f"消息记录创建成功 - ID: {record.id if hasattr(record, 'id') else 'unknown'}")
+            logger.info(
+                f"消息记录创建成功 - ID: {record.id if hasattr(record, 'id') else 'unknown'}"
+            )
         except Exception as e:
             logger.error(f"记录消息时出错: {e} - 用户ID: {user_id}, Arxiv ID: {arxiv_id}")
 
-async def process_recommendations_background(user_id: str, chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE):
+
+async def process_recommendations_background(
+    user_id: str, chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE
+):
     """
     后台处理推荐逻辑的异步任务
     """
@@ -195,9 +240,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         settings_ok, error_message = await check_user_settings(user_id)
         if not settings_ok:
             await context.bot.edit_message_text(
-                text=error_message,
-                chat_id=chat_id,
-                message_id=message_id
+                text=error_message, chat_id=chat_id, message_id=message_id
             )
             return
 
@@ -207,14 +250,12 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
             await context.bot.edit_message_text(
                 text="目前没有推荐的论文。稍后再试或调整您的偏好。",
                 chat_id=chat_id,
-                message_id=message_id
+                message_id=message_id,
             )
             return
         else:
             await context.bot.edit_message_text(
-                text="为您推荐的论文摘要如下：",
-                chat_id=chat_id,
-                message_id=message_id
+                text="为您推荐的论文摘要如下：", chat_id=chat_id, message_id=message_id
             )
 
         # Format recommendations for Telegram
@@ -225,21 +266,18 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         send_results = []
         for rec in formatted.values():
             try:
-                # Try sending with Markdown first
+                # Try sending with MarkdownV2 first
                 result = await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=rec,
-                    parse_mode='MarkdownV2'
+                    chat_id=chat_id, text=rec, parse_mode="MarkdownV2"
                 )
                 send_results.append(result)
             except Exception as markdown_error:
-                logger.warning(f"Failed to send message with Markdown, trying plain text: {markdown_error}")
+                logger.warning(
+                    f"Failed to send message with Markdown, trying plain text: {markdown_error}"
+                )
                 try:
                     # Fallback to plain text without parse_mode
-                    result = await context.bot.send_message(
-                        chat_id=chat_id,
-                        text=rec
-                    )
+                    result = await context.bot.send_message(chat_id=chat_id, text=rec)
                     send_results.append(result)
                 except Exception as plain_error:
                     logger.error(f"Failed to send message even with plain text: {plain_error}")
@@ -248,7 +286,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         # 简化 record_messages 调用
         user_setting = UserSetting.get_by_id(user_id)
         if user_setting:
-            for result, arxiv_id in zip(send_results, recommendations['id']):
+            for result, arxiv_id in zip(send_results, recommendations["id"], strict=False):
                 try:
                     # Handle exceptions in send_results
                     if isinstance(result, Exception):
@@ -261,7 +299,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
 
                     # Extract message_id from the Message object
                     message_id = None
-                    if hasattr(result, 'message_id'):
+                    if hasattr(result, "message_id"):
                         message_id = result.message_id
                         logger.info(f"成功提取 message_id: {message_id}")
                     else:
@@ -269,7 +307,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                         continue
 
                     if message_id is None:
-                        logger.error(f"message_id为None，跳过记录")
+                        logger.error("message_id为None，跳过记录")
                         continue
 
                     record = MessageRecord.create(
@@ -283,6 +321,7 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
                 except Exception as e:
                     logger.error(f"记录消息时出错: {e}")
                     import traceback
+
                     logger.error(f"详细错误信息: {traceback.format_exc()}")
 
         logger.info(f"Sent {len(send_results)} recommendations to user {user_id}")
@@ -291,12 +330,11 @@ async def process_recommendations_background(user_id: str, chat_id: int, message
         logger.error(f"Error in background recommendation processing: {e}")
         try:
             await context.bot.edit_message_text(
-                text="抱歉，获取推荐时出错。请稍后再试。",
-                chat_id=chat_id,
-                message_id=message_id
+                text="抱歉，获取推荐时出错。请稍后再试。", chat_id=chat_id, message_id=message_id
             )
         except Exception as edit_error:
             logger.error(f"Failed to edit error message: {edit_error}")
+
 
 # Handler for recommend command
 async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -313,13 +351,14 @@ async def recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_id=str(update.effective_user.id),
             chat_id=update.effective_chat.id,
             message_id=initial_message.message_id,
-            context=context
+            context=context,
         )
     )
 
     logger.info(f"Recommendation request queued for user {update.effective_user.id}")
     # 立即返回，不等待后台任务完成
     return
+
 
 async def display_current_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -340,7 +379,11 @@ async def display_current_settings(update: Update, context: ContextTypes.DEFAULT
 
         # 格式化当前设置
         pat_display = format_pat_safely(user_setting.pat) if user_setting.pat else "未设置"
-        repo_display = f"{user_setting.github_id}/{user_setting.repo_name}" if user_setting.github_id and user_setting.repo_name else "未设置"
+        repo_display = (
+            f"{user_setting.github_id}/{user_setting.repo_name}"
+            if user_setting.github_id and user_setting.repo_name
+            else "未设置"
+        )
         cron_display = user_setting.cron if user_setting.cron else "未设置"
 
         settings_message = (
@@ -362,6 +405,7 @@ async def display_current_settings(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"显示用户设置时出错: {e}")
         await update.message.reply_text("获取设置信息时出错，请稍后再试。")
 
+
 async def update_settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Handles the /setting command to update user settings.
@@ -381,7 +425,103 @@ async def update_settings_command(update: Update, context: ContextTypes.DEFAULT_
     # This function is expected to return a tuple: (bool_success, str_message)
     success, message = await update_settings(user_id, settings_text)
 
-    await update.message.reply_text(message)
+    if success:
+        logger.info(f"User {user_id} settings updated successfully: {settings_text}")
+    else:
+        logger.warning(f"User {user_id} settings update failed: {settings_text} - {message}")
+
+    # 尝试发送回复消息，如果网络超时则记录日志
+    try:
+        await update.message.reply_text(message)
+    except Exception as e:
+        logger.error(f"Failed to send reply to user {user_id}: {e}")
+        # 不重新抛出异常，避免影响后续处理
+
+
+async def process_sync_background(
+    user_id: str, chat_id: int, message_id: int, context: ContextTypes.DEFAULT_TYPE
+):
+    """
+    后台处理偏好同步的异步任务
+    """
+    try:
+        # 检查用户设置
+        user_setting = UserSetting.get_by_id(user_id)
+        if not user_setting:
+            await context.bot.edit_message_text(
+                text="❌ 您还没有进行任何设置。请使用 /setting 命令进行配置。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            return
+
+        if not user_setting.repo_url or not user_setting.github_pat:
+            await context.bot.edit_message_text(
+                text="❌ 偏好同步需要配置 GitHub 仓库和 PAT。请使用 /setting 命令完善配置。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            return
+
+        # 执行偏好同步
+        from src.preference import PreferenceManager
+        preference_manager = PreferenceManager()
+
+        # 同步最近7天的偏好数据，放在线程池中执行
+        success = await run_in_global_pool(
+            preference_manager.sync_user_preferences, user_id, 7
+        )
+
+        if success:
+            await context.bot.edit_message_text(
+                text="✅ 偏好同步完成！您的反应数据已上传到 GitHub 仓库。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            logger.info(f"Successfully synced preferences for user {user_id}")
+        else:
+            await context.bot.edit_message_text(
+                text="❌ 偏好同步失败。请检查您的 GitHub 配置或稍后再试。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+            logger.error(f"Failed to sync preferences for user {user_id}")
+
+    except Exception as e:
+        logger.error(f"Error in background sync processing for user {user_id}: {e}")
+        try:
+            await context.bot.edit_message_text(
+                text="❌ 同步过程中出现错误，请稍后再试。",
+                chat_id=chat_id,
+                message_id=message_id
+            )
+        except Exception as edit_error:
+            logger.error(f"Failed to edit error message: {edit_error}")
+
+
+async def sync_preferences(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    处理 /sync 命令，手动触发用户偏好同步
+    """
+    user_id = str(update.effective_user.id)
+    logger.info(f"User {user_id} requested manual preference sync")
+
+    # 发送处理中消息
+    initial_message = await update.message.reply_text("🔄 正在同步您的偏好数据，请稍候...")
+
+    # 将处理逻辑提交到后台线程池
+    asyncio.create_task(
+        process_sync_background(
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
+            message_id=initial_message.message_id,
+            context=context,
+        )
+    )
+
+    logger.info(f"Preference sync request queued for user {user_id}")
+    # 立即返回，不等待后台任务完成
+
 
 async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -394,7 +534,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     try:
         # 获取反应信息
-        if not hasattr(update, 'message_reaction'):
+        if not hasattr(update, "message_reaction"):
             logger.warning("update 对象中没有 message_reaction 属性")
             return
 
@@ -407,7 +547,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 获取群组ID（如果在群组中）
         group_id = None
-        if update.effective_chat and update.effective_chat.type in ['group', 'supergroup']:
+        if update.effective_chat and update.effective_chat.type in ["group", "supergroup"]:
             group_id = str(update.effective_chat.id)
 
         # 获取 emoji
@@ -415,16 +555,16 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_removing = False
 
         # 检查是否是添加反应
-        if hasattr(reaction, 'new_reaction') and reaction.new_reaction:
+        if hasattr(reaction, "new_reaction") and reaction.new_reaction:
             for r in reaction.new_reaction:
-                if hasattr(r, 'emoji'):
+                if hasattr(r, "emoji"):
                     emoji = r.emoji
                     is_removing = False
                     break
         # 检查是否是移除反应
-        elif hasattr(reaction, 'old_reaction') and reaction.old_reaction:
+        elif hasattr(reaction, "old_reaction") and reaction.old_reaction:
             for r in reaction.old_reaction:
-                if hasattr(r, 'emoji'):
+                if hasattr(r, "emoji"):
                     emoji = r.emoji
                     is_removing = True
                     break
@@ -434,18 +574,22 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # 获取消息ID
-        message_id = reaction.message_id if hasattr(reaction, 'message_id') else None
+        message_id = reaction.message_id if hasattr(reaction, "message_id") else None
 
         if not message_id:
-            logger.warning(f"无法获取消息ID")
+            logger.warning("无法获取消息ID")
             return
 
-        logger.info(f"收到用户 {user_id} 对消息 {message_id} 的{'移除' if is_removing else '添加'}反应: {emoji}")
+        logger.info(
+            f"收到用户 {user_id} 对消息 {message_id} 的{'移除' if is_removing else '添加'}反应: {emoji}"
+        )
 
         # 获取消息记录 - 使用更精确的查找方法
         record = MessageRecord.get_by_context(group_id, user_id, message_id)
         if not record:
-            logger.warning(f"未找到消息 {message_id} 的记录 (group_id: {group_id}, user_id: {user_id})")
+            logger.warning(
+                f"未找到消息 {message_id} 的记录 (group_id: {group_id}, user_id: {user_id})"
+            )
             return
 
         # 记录反应
@@ -457,7 +601,9 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # 如果是移除反应，删除记录
                 if existing_reaction:
                     existing_reaction.delete()
-                    logger.info(f"已删除用户 {user_id} 对论文 {record.arxiv_id} 的反应: {existing_reaction.emoji}")
+                    logger.info(
+                        f"已删除用户 {user_id} 对论文 {record.arxiv_id} 的反应: {existing_reaction.emoji}"
+                    )
             else:
                 # 如果是添加反应
                 if existing_reaction:
@@ -465,26 +611,30 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     old_emoji = existing_reaction.emoji
                     existing_reaction.emoji = emoji
                     existing_reaction.save()
-                    logger.info(f"已更新用户 {user_id} 对论文 {record.arxiv_id} 的反应: {old_emoji} -> {emoji}")
+                    logger.info(
+                        f"已更新用户 {user_id} 对论文 {record.arxiv_id} 的反应: {old_emoji} -> {emoji}"
+                    )
                 else:
                     # 如果没有反应，创建新的反应记录
-                    reaction_record = ReactionRecord.create(
+                    ReactionRecord.create(
                         group_id=group_id,
                         user_id=user_id,
                         message_id=message_id,
                         arxiv_id=record.arxiv_id,
-                        emoji=emoji
+                        emoji=emoji,
                     )
                     logger.info(f"已记录用户 {user_id} 对论文 {record.arxiv_id} 的反应: {emoji}")
 
         except Exception as e:
             logger.error(f"记录反应时出错: {str(e)}")
             import traceback
+
             logger.error(f"堆栈跟踪: {traceback.format_exc()}")
 
     except Exception as e:
         logger.error(f"处理反应时出错: {str(e)}")
         import traceback
+
         logger.error(f"堆栈跟踪: {traceback.format_exc()}")
 
 
@@ -508,6 +658,7 @@ async def handle_reaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
 #     await update.message.reply_text("请提供 Arxiv ID 列表（每行一个），我将为您查找相似论文。")
 #     # The actual processing will happen in handle_message if the user sends IDs
 
+
 # Run method
 async def run():
     """
@@ -519,6 +670,7 @@ async def run():
     # No need to call check_and_initialize_db() here anymore.
 
     import fcntl
+
     # import sys # sys is already imported at the top
 
     logger.info("Starting Telegram Bot...")
@@ -542,23 +694,25 @@ async def run():
 
     # 然后测试实际的任务
     logger.debug("尝试提交正式 upsert_pat 任务...")
-    a = await upsert_pat("test_user", "test_token")
-
+    await upsert_pat("test_user", "test_token")
 
     # Create a lock file to prevent multiple instances
-    lock_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bot.lock')
-    lock_file = open(lock_file_path, 'w')
+    lock_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.lock")
+    lock_file = open(lock_file_path, "w")
     try:
         fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
+    except OSError:
         logger.error("Another instance of the bot is already running. Exiting.")
         sys.exit(1)
 
     # Add command handlers
     # 添加正确且合适的handlers，包括reaction
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("setting", update_settings_command)) # Changed to update_settings_command
+    application.add_handler(
+        CommandHandler("setting", update_settings_command)
+    )  # Changed to update_settings_command
     application.add_handler(CommandHandler("recommend", recommend))
+    application.add_handler(CommandHandler("sync", sync_preferences))
     # application.add_handler(CommandHandler("digest", digest)) # digest command is commented out
     # application.add_handler(CommandHandler("similar", similar)) # similar command is commented out
     # handel reactions
@@ -591,11 +745,12 @@ async def run():
         os.remove(lock_file_path)
         logger.info("Bot stopped.")
 
+
 if __name__ == "__main__":
     """
     Main execution block.
     Runs the Telegram bot if this script is executed directly.
     """
-    db.initialize() # This sets up db.engine
+    db.initialize()  # This sets up db.engine
 
     asyncio.run(run())

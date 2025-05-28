@@ -2,15 +2,18 @@
 基础模型类
 提供通用的数据库操作方法
 """
-from typing import Optional, Any, Dict, List, Union, Tuple, Type, TypeVar, Generic, ClassVar
-from sqlalchemy import create_engine, Column, String, Integer, Boolean, DateTime, ForeignKey, Table, MetaData, select, update, delete, and_, or_, text
-from sqlalchemy.orm import sessionmaker, Session, DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.sql import Select
-from datetime import datetime
-from src.db import db
-from loguru import logger
 
-T = TypeVar('T', bound='BaseModel')
+from datetime import datetime
+from typing import Any, TypeVar
+
+from loguru import logger
+from sqlalchemy import Column, DateTime, String
+from sqlalchemy.orm import DeclarativeBase
+
+from src.db import db
+
+T = TypeVar("T", bound="BaseModel")
+
 
 class BaseModel(DeclarativeBase):
     """基础模型类"""
@@ -37,13 +40,13 @@ class BaseModel(DeclarativeBase):
             raise
 
     @classmethod
-    def get_by_id(cls, id: Union[str, int]) -> Optional[T]:
+    def get_by_id(cls, id: str | int) -> T | None:
         """根据ID获取记录"""
         with db.session() as session:
             return session.query(cls).filter_by(id=str(id)).first()
 
     @classmethod
-    def get_all(cls) -> List[T]:
+    def get_all(cls) -> list[T]:
         """获取所有记录"""
         with db.session() as session:
             return session.query(cls).all()
@@ -61,7 +64,7 @@ class BaseModel(DeclarativeBase):
             session.commit()
 
     @classmethod
-    def filter(cls, **kwargs) -> List[T]:
+    def filter(cls, **kwargs) -> list[T]:
         """根据条件过滤记录"""
         with db.session() as session:
             query = session.query(cls)
@@ -75,7 +78,7 @@ class BaseModel(DeclarativeBase):
             return query.all()
 
     @classmethod
-    def filter_one(cls, **kwargs) -> Optional[T]:
+    def filter_one(cls, **kwargs) -> T | None:
         """根据条件获取单条记录"""
         with db.session() as session:
             query = session.query(cls)
@@ -89,7 +92,7 @@ class BaseModel(DeclarativeBase):
             return query.first()
 
     @classmethod
-    def filter_by(cls, **kwargs) -> List[T]:
+    def filter_by(cls, **kwargs) -> list[T]:
         """根据条件模糊匹配记录"""
         with db.session() as session:
             query = session.query(cls)
@@ -119,32 +122,34 @@ class BaseModel(DeclarativeBase):
         return cls.count(**kwargs) > 0
 
     @classmethod
-    def bulk_create(cls, objects: List[T]) -> None:
+    def bulk_create(cls, objects: list[T]) -> None:
         """批量创建记录"""
         with db.session() as session:
             session.bulk_save_objects(objects)
             session.commit()
 
     @classmethod
-    def bulk_update(cls, objects: List[T], update_fields: List[str]) -> None:
+    def bulk_update(cls, objects: list[T], update_fields: list[str]) -> None:
         """批量更新记录"""
         with db.session() as session:
-            session.bulk_update_mappings(cls, [{
-                'id': obj.id,
-                **{field: getattr(obj, field) for field in update_fields}
-            } for obj in objects])
+            session.bulk_update_mappings(
+                cls,
+                [
+                    {"id": obj.id, **{field: getattr(obj, field) for field in update_fields}}
+                    for obj in objects
+                ],
+            )
             session.commit()
 
     @classmethod
-    def bulk_delete(cls, ids: List[str]) -> None:
+    def bulk_delete(cls, ids: list[str]) -> None:
         """批量删除记录"""
         with db.session() as session:
-            session.query(cls).filter(cls.id.in_([str(id) for id in ids])).delete(synchronize_session=False)
+            session.query(cls).filter(cls.id.in_([str(id) for id in ids])).delete(
+                synchronize_session=False
+            )
             session.commit()
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
-        return {
-            column.name: getattr(self, column.name)
-            for column in self.__table__.columns
-        }
+        return {column.name: getattr(self, column.name) for column in self.__table__.columns}

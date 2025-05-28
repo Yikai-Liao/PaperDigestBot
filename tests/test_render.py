@@ -5,15 +5,17 @@ This module tests the markdown to Telegram conversion functionality,
 message validation, and the complete rendering pipeline using real test data.
 """
 
-import pytest
-import polars as pl
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
+import polars as pl
+import pytest
+
 from src.render import (
-    markdown_to_telegram,
     escape_telegram_markdown,
+    markdown_to_telegram,
+    render_summary_tg,
     validate_telegram_message,
-    render_summary_tg
 )
 
 
@@ -83,7 +85,26 @@ class TestEscapeTelegramMarkdown:
 
     def test_escape_all_special_chars(self):
         """Test escaping of all special characters."""
-        special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        special_chars = [
+            "_",
+            "*",
+            "[",
+            "]",
+            "(",
+            ")",
+            "~",
+            "`",
+            ">",
+            "#",
+            "+",
+            "-",
+            "=",
+            "|",
+            "{",
+            "}",
+            ".",
+            "!",
+        ]
         text = "".join(special_chars)
         result = escape_telegram_markdown(text)
         for char in special_chars:
@@ -153,7 +174,7 @@ class TestRenderSummaryTg:
         # Take first row for testing
         single_row_df = test_data.head(1)
 
-        with patch('src.render.logger') as mock_logger:
+        with patch("src.render.logger") as mock_logger:
             result = render_summary_tg(single_row_df)
 
             # Should return a dictionary
@@ -161,7 +182,7 @@ class TestRenderSummaryTg:
             assert len(result) == 1
 
             # Should have the paper ID as key
-            paper_id = single_row_df['id'][0]
+            paper_id = single_row_df["id"][0]
             assert paper_id in result
 
             # Should contain expected content
@@ -193,21 +214,23 @@ class TestRenderSummaryTg:
     def test_render_with_missing_fields(self):
         """Test rendering with missing or None fields."""
         # Create test data with missing fields
-        test_df = pl.DataFrame({
-            'id': ['test_paper'],
-            'title': ['Test Title'],
-            'authors': [None],  # Missing authors
-            'institution': [[]],  # Empty institution
-            'keywords': [None],  # Missing keywords
-            'score': [None],  # Missing score
-            # Missing other required fields
-        })
+        test_df = pl.DataFrame(
+            {
+                "id": ["test_paper"],
+                "title": ["Test Title"],
+                "authors": [None],  # Missing authors
+                "institution": [[]],  # Empty institution
+                "keywords": [None],  # Missing keywords
+                "score": [None],  # Missing score
+                # Missing other required fields
+            }
+        )
 
         result = render_summary_tg(test_df)
 
         assert len(result) == 1
-        assert 'test_paper' in result
-        rendered_text = result['test_paper']
+        assert "test_paper" in result
+        rendered_text = result["test_paper"]
 
         # Should handle missing fields gracefully
         assert "N/A" in rendered_text  # Should show N/A for missing fields
@@ -216,42 +239,44 @@ class TestRenderSummaryTg:
     def test_render_with_malformed_data(self):
         """Test rendering with malformed data that could cause issues."""
         # Create test data with potentially problematic content
-        test_df = pl.DataFrame({
-            'id': ['malformed_paper'],
-            'title': ['Title with **markdown** and *formatting*'],
-            'authors': [['Author with\x00null', 'Author\rwith\rcarriage']],
-            'institution': [['Institution with special chars: [](){}']],
-            'keywords': [['keyword-with-dashes', 'keyword with spaces']],
-            'score': [0.85],
-            'one_sentence_summary': ['Summary with problematic chars\x00\r'],
-            'problem_background': ['Background'],
-            'method': ['Method'],
-            'experiment': ['Experiment'],
-            'further_thoughts': ['Thoughts'],
-            'updated': ['2024-01-01'],
-            'model': ['test-model']
-        })
+        test_df = pl.DataFrame(
+            {
+                "id": ["malformed_paper"],
+                "title": ["Title with **markdown** and *formatting*"],
+                "authors": [["Author with\x00null", "Author\rwith\rcarriage"]],
+                "institution": [["Institution with special chars: [](){}"]],
+                "keywords": [["keyword-with-dashes", "keyword with spaces"]],
+                "score": [0.85],
+                "one_sentence_summary": ["Summary with problematic chars\x00\r"],
+                "problem_background": ["Background"],
+                "method": ["Method"],
+                "experiment": ["Experiment"],
+                "further_thoughts": ["Thoughts"],
+                "updated": ["2024-01-01"],
+                "model": ["test-model"],
+            }
+        )
 
         result = render_summary_tg(test_df)
 
         assert len(result) == 1
-        assert 'malformed_paper' in result
-        rendered_text = result['malformed_paper']
+        assert "malformed_paper" in result
+        rendered_text = result["malformed_paper"]
 
         # Should clean problematic characters
-        assert '\x00' not in rendered_text
-        assert '\r' not in rendered_text
+        assert "\x00" not in rendered_text
+        assert "\r" not in rendered_text
 
         # Should format keywords properly
-        assert '#keywordwithdashes' in rendered_text
-        assert '#keywordwithspaces' in rendered_text
+        assert "#keywordwithdashes" in rendered_text
+        assert "#keywordwithspaces" in rendered_text
 
     def test_render_error_handling(self):
         """Test error handling in the rendering process."""
         # Create invalid DataFrame
-        invalid_df = pl.DataFrame({'invalid': ['data']})
+        invalid_df = pl.DataFrame({"invalid": ["data"]})
 
-        with patch('src.render.logger') as mock_logger:
+        with patch("src.render.logger") as mock_logger:
             result = render_summary_tg(invalid_df)
 
             # Should return fallback message
@@ -267,12 +292,12 @@ class TestRenderSummaryTg:
         single_row_df = test_data.head(1)
 
         # Mock template to raise an error
-        with patch('jinja2.Environment') as mock_env:
+        with patch("jinja2.Environment") as mock_env:
             mock_template = MagicMock()
             mock_template.render.side_effect = Exception("Template error")
             mock_env.return_value.get_template.return_value = mock_template
 
-            with patch('src.render.logger') as mock_logger:
+            with patch("src.render.logger") as mock_logger:
                 result = render_summary_tg(single_row_df)
 
                 # Should return fallback message
@@ -295,18 +320,18 @@ class TestRenderSummaryTg:
         assert "', ," not in rendered_text
 
         # Should have proper author formatting
-        lines = rendered_text.split('\n')
-        author_line = next((line for line in lines if line.startswith('👥 作者:')), None)
+        lines = rendered_text.split("\n")
+        author_line = next((line for line in lines if line.startswith("👥 作者:")), None)
         assert author_line is not None
 
         # Authors should be properly joined with commas
         if "N/A" not in author_line:
             # Should contain actual author names, not character breakdown
-            assert len(author_line.split(', ')) >= 1
+            assert len(author_line.split(", ")) >= 1
             # Should not contain single characters separated by commas
-            author_part = author_line.replace('👥 作者: ', '')
+            author_part = author_line.replace("👥 作者: ", "")
             if author_part != "N/A":
-                authors = author_part.split(', ')
+                authors = author_part.split(", ")
                 for author in authors:
                     assert len(author.strip()) > 1  # Each author should be more than 1 character
 

@@ -6,18 +6,20 @@ Uses PostgreSQL as job store for persistence and integrates with the Telegram bo
 """
 
 import asyncio
-from typing import Optional, Dict, Any
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.executors.asyncio import AsyncIOExecutor
-from loguru import logger
+from typing import Any
+
 import pytz
+from apscheduler.executors.asyncio import AsyncIOExecutor
+from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from loguru import logger
 from telegram.ext import Application
 
-from src.models import UserSetting, MessageRecord
-from src.dispatcher import request_recommendations
-from src.render import render_summary_tg
 from src.db_config import default_config
+from src.dispatcher import request_recommendations
+from src.models import MessageRecord, UserSetting
+from src.preference import PreferenceManager
+from src.render import render_summary_tg
 
 
 class PaperDigestScheduler:
@@ -30,8 +32,8 @@ class PaperDigestScheduler:
     """
 
     def __init__(self):
-        self.scheduler: Optional[AsyncIOScheduler] = None
-        self.bot_application: Optional[Application] = None
+        self.scheduler: AsyncIOScheduler | None = None
+        self.bot_application: Application | None = None
 
     def initialize(self, bot_application=None):
         """Initialize the APScheduler with PostgreSQL job store."""
@@ -42,31 +44,27 @@ class PaperDigestScheduler:
         self.bot_application = bot_application
 
         # Configure job store using existing PostgreSQL connection
-        jobstores = {
-            'default': SQLAlchemyJobStore(url=default_config.dsn)
-        }
+        jobstores = {"default": SQLAlchemyJobStore(url=default_config.dsn)}
 
         # Configure executors
-        executors = {
-            'default': AsyncIOExecutor()
-        }
+        executors = {"default": AsyncIOExecutor()}
 
         # Job defaults
         job_defaults = {
-            'coalesce': True,  # Coalesce missed executions
-            'max_instances': 1,  # Only one instance per user
-            'misfire_grace_time': 300  # 5 minutes grace time
+            "coalesce": True,  # Coalesce missed executions
+            "max_instances": 1,  # Only one instance per user
+            "misfire_grace_time": 300,  # 5 minutes grace time
         }
 
         # Create scheduler
         self.scheduler = AsyncIOScheduler(
-            jobstores=jobstores,
-            executors=executors,
-            job_defaults=job_defaults,
-            timezone=pytz.UTC
+            jobstores=jobstores, executors=executors, job_defaults=job_defaults, timezone=pytz.UTC
         )
 
         logger.info("Scheduler initialized with PostgreSQL job store")
+
+        # Add default preference sync job (daily at 3 AM UTC)
+        self._add_preference_sync_job()
 
     def start(self):
         """Start the scheduler."""
@@ -105,29 +103,29 @@ class PaperDigestScheduler:
             # 5-field format: minute hour day month day_of_week
             minute, hour, day, month, day_of_week = parts
             return {
-                'minute': minute,
-                'hour': hour,
-                'day': day,
-                'month': month,
-                'day_of_week': day_of_week,
-                'timezone': pytz.UTC
+                "minute": minute,
+                "hour": hour,
+                "day": day,
+                "month": month,
+                "day_of_week": day_of_week,
+                "timezone": pytz.UTC,
             }
         elif len(parts) == 6:
             # 6-field format: second minute hour day month day_of_week
             second, minute, hour, day, month, day_of_week = parts
             return {
-                'second': second,
-                'minute': minute,
-                'hour': hour,
-                'day': day,
-                'month': month,
-                'day_of_week': day_of_week,
-                'timezone': pytz.UTC
+                "second": second,
+                "minute": minute,
+                "hour": hour,
+                "day": day,
+                "month": month,
+                "day_of_week": day_of_week,
+                "timezone": pytz.UTC,
             }
         else:
-            raise ValueError(f"Invalid cron expression format. Expected 5 or 6 fields, got {len(parts)}")
-
-
+            raise ValueError(
+                f"Invalid cron expression format. Expected 5 or 6 fields, got {len(parts)}"
+            )
 
     def add_user_schedule(self, user_id: str, cron_expression: str) -> bool:
         """
@@ -152,12 +150,12 @@ class PaperDigestScheduler:
             # Use module-level function to avoid serialization issues
             self.scheduler.add_job(
                 execute_scheduled_recommendation,
-                'cron',
+                "cron",
                 args=[user_id],
                 id=job_id,
                 name=f"Recommendation for user {user_id}",
                 replace_existing=True,
-                **self._parse_cron_to_kwargs(cron_expression)
+                **self._parse_cron_to_kwargs(cron_expression),
             )
 
             logger.info(f"Added scheduled job for user {user_id} with cron: {cron_expression}")
@@ -197,7 +195,7 @@ class PaperDigestScheduler:
             logger.error(f"Failed to remove schedule for user {user_id}: {e}")
             return False
 
-    def update_user_schedule(self, user_id: str, cron_expression: Optional[str]) -> bool:
+    def update_user_schedule(self, user_id: str, cron_expression: str | None) -> bool:
         """
         Update a user's scheduled recommendation job.
 
@@ -208,12 +206,12 @@ class PaperDigestScheduler:
         Returns:
             bool: True if successful, False otherwise
         """
-        if cron_expression is None or cron_expression.lower() == '关闭':
+        if cron_expression is None or cron_expression.lower() == "关闭":
             return self.remove_user_schedule(user_id)
         else:
             return self.add_user_schedule(user_id, cron_expression)
 
-    def get_user_schedule_info(self, user_id: str) -> Optional[Dict[str, Any]]:
+    def get_user_schedule_info(self, user_id: str) -> dict[str, Any] | None:
         """
         Get information about a user's scheduled job.
 
@@ -232,10 +230,10 @@ class PaperDigestScheduler:
 
             if job:
                 return {
-                    'job_id': job.id,
-                    'name': job.name,
-                    'next_run_time': job.next_run_time,
-                    'trigger': str(job.trigger)
+                    "job_id": job.id,
+                    "name": job.name,
+                    "next_run_time": job.next_run_time,
+                    "trigger": str(job.trigger),
                 }
             else:
                 return None
@@ -288,6 +286,58 @@ class PaperDigestScheduler:
             logger.error(f"Failed to sync schedule for user {user_id}: {e}")
             return False
 
+    def _add_preference_sync_job(self):
+        """Add daily preference synchronization job at UTC midnight."""
+        try:
+            if self.scheduler is None:
+                logger.error("Scheduler not initialized")
+                return
+
+            # Add preference sync job at UTC midnight (00:00)
+            self.scheduler.add_job(
+                execute_preference_sync,
+                "cron",
+                id="preference_sync_job",
+                name="Daily preference synchronization",
+                hour=0,
+                minute=0,
+                timezone=pytz.UTC,
+                replace_existing=True,
+            )
+
+            logger.info("Added preference sync job at 00:00 UTC")
+
+        except Exception as e:
+            logger.error(f"Failed to add preference sync job: {e}")
+
+    def trigger_preference_sync(self) -> bool:
+        """
+        Manually trigger preference synchronization for all users.
+
+        Returns:
+            bool: True if sync was triggered successfully, False otherwise
+        """
+        try:
+            if self.scheduler is None:
+                logger.error("Scheduler not initialized")
+                return False
+
+            # Add one-time job to run immediately
+            self.scheduler.add_job(
+                execute_preference_sync,
+                "date",
+                id="manual_preference_sync",
+                name="Manual preference synchronization",
+                replace_existing=True,
+            )
+
+            logger.info("Triggered manual preference synchronization")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to trigger preference sync: {e}")
+            return False
+
 
 # Module-level function to avoid serialization issues with scheduler instances
 async def execute_scheduled_recommendation(user_id: str):
@@ -329,7 +379,7 @@ async def execute_scheduled_recommendation(user_id: str):
             try:
                 await scheduler.bot_application.bot.send_message(
                     chat_id=int(user_id),
-                    text="⚠️ 定时推荐失败：您的设置不完整。请使用 /setting 命令检查并完善您的配置。"
+                    text="⚠️ 定时推荐失败：您的设置不完整。请使用 /setting 命令检查并完善您的配置。",
                 )
             except Exception as e:
                 logger.error(f"Failed to send error message to user {user_id}: {e}")
@@ -342,8 +392,7 @@ async def execute_scheduled_recommendation(user_id: str):
             # Optionally send a message to user about no recommendations
             try:
                 await scheduler.bot_application.bot.send_message(
-                    chat_id=int(user_id),
-                    text="📚 定时推荐：目前没有新的论文推荐。"
+                    chat_id=int(user_id), text="📚 定时推荐：目前没有新的论文推荐。"
                 )
             except Exception as e:
                 logger.error(f"Failed to send no-recommendations message to user {user_id}: {e}")
@@ -354,6 +403,7 @@ async def execute_scheduled_recommendation(user_id: str):
             # Use thread pool for CPU-intensive rendering
             loop = asyncio.get_running_loop()
             from concurrent.futures import ThreadPoolExecutor
+
             with ThreadPoolExecutor() as executor:
                 formatted = await loop.run_in_executor(executor, render_summary_tg, recommendations)
         except Exception as e:
@@ -364,28 +414,26 @@ async def execute_scheduled_recommendation(user_id: str):
         try:
             # Send header message
             await scheduler.bot_application.bot.send_message(
-                chat_id=int(user_id),
-                text="📚 定时推荐：为您推荐的论文摘要如下："
+                chat_id=int(user_id), text="📚 定时推荐：为您推荐的论文摘要如下："
             )
 
             # Send each recommendation and record messages
             send_results = []
             for rec_text in formatted.values():
                 try:
-                    # Try sending with Markdown first
+                    # Try sending with MarkdownV2 first
                     result = await scheduler.bot_application.bot.send_message(
-                        chat_id=int(user_id),
-                        text=rec_text,
-                        parse_mode='MarkdownV2'
+                        chat_id=int(user_id), text=rec_text, parse_mode="MarkdownV2"
                     )
                     send_results.append(result)
                 except Exception as markdown_error:
-                    logger.warning(f"Failed to send message with Markdown, trying plain text: {markdown_error}")
+                    logger.warning(
+                        f"Failed to send message with Markdown, trying plain text: {markdown_error}"
+                    )
                     try:
                         # Fallback to plain text without parse_mode
                         result = await scheduler.bot_application.bot.send_message(
-                            chat_id=int(user_id),
-                            text=rec_text
+                            chat_id=int(user_id), text=rec_text
                         )
                         send_results.append(result)
                     except Exception as plain_error:
@@ -393,7 +441,7 @@ async def execute_scheduled_recommendation(user_id: str):
                         send_results.append(plain_error)
 
             # Record messages to database (similar to process_recommendations_background)
-            for result, arxiv_id in zip(send_results, recommendations['id']):
+            for result, arxiv_id in zip(send_results, recommendations["id"], strict=False):
                 try:
                     # Handle exceptions in send_results
                     if isinstance(result, Exception):
@@ -402,7 +450,7 @@ async def execute_scheduled_recommendation(user_id: str):
 
                     # Extract message_id from the Message object
                     message_id = None
-                    if hasattr(result, 'message_id'):
+                    if hasattr(result, "message_id"):
                         message_id = result.message_id
                         logger.debug(f"成功提取定时推荐消息 message_id: {message_id}")
                     else:
@@ -410,7 +458,7 @@ async def execute_scheduled_recommendation(user_id: str):
                         continue
 
                     if message_id is None:
-                        logger.error(f"定时推荐消息 message_id为None，跳过记录")
+                        logger.error("定时推荐消息 message_id为None，跳过记录")
                         continue
 
                     # Create message record
@@ -425,9 +473,12 @@ async def execute_scheduled_recommendation(user_id: str):
                 except Exception as e:
                     logger.error(f"记录定时推荐消息时出错: {e}")
                     import traceback
+
                     logger.error(f"详细错误信息: {traceback.format_exc()}")
 
-            logger.info(f"Successfully sent {len(formatted)} scheduled recommendations to user {user_id}")
+            logger.info(
+                f"Successfully sent {len(formatted)} scheduled recommendations to user {user_id}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to send scheduled recommendations to user {user_id}: {e}")
@@ -435,11 +486,12 @@ async def execute_scheduled_recommendation(user_id: str):
     except Exception as e:
         logger.error(f"Error in scheduled recommendation for user {user_id}: {e}")
         import traceback
+
         logger.error(f"Traceback: {traceback.format_exc()}")
 
 
 # Global scheduler instance for the application
-_scheduler_instance: Optional[PaperDigestScheduler] = None
+_scheduler_instance: PaperDigestScheduler | None = None
 
 
 def get_scheduler() -> PaperDigestScheduler:
@@ -451,7 +503,7 @@ def get_scheduler() -> PaperDigestScheduler:
 
 
 # Public API functions for integration with the bot
-def start_scheduler(bot_app: Optional[Application] = None):
+def start_scheduler(bot_app: Application | None = None):
     """
     Initialize and start the scheduler.
 
@@ -503,3 +555,49 @@ def sync_user_schedule_from_settings(user_id: str) -> bool:
     return scheduler.sync_user_schedule_from_settings(user_id)
 
 
+def trigger_preference_sync() -> bool:
+    """
+    Manually trigger preference synchronization for all users.
+
+    Returns:
+        bool: True if sync was triggered successfully, False otherwise
+    """
+    scheduler = get_scheduler()
+    return scheduler.trigger_preference_sync()
+
+
+# Module-level function for preference synchronization
+async def execute_preference_sync():
+    """
+    Execute preference synchronization for all users.
+    This function will be called by APScheduler.
+    """
+    try:
+        logger.info("Starting scheduled preference synchronization")
+
+        # Create preference manager instance
+        preference_manager = PreferenceManager()
+
+        # Sync preferences for all users (look back 2 days)
+        results = preference_manager.sync_all_users_preferences(days_back=2)
+
+        # Log results
+        total_users = len(results)
+        successful_syncs = sum(results.values())
+        failed_syncs = total_users - successful_syncs
+
+        logger.info(
+            f"Preference synchronization completed: "
+            f"{successful_syncs} successful, {failed_syncs} failed out of {total_users} users"
+        )
+
+        # If there were failures, log them
+        if failed_syncs > 0:
+            failed_users = [user_id for user_id, success in results.items() if not success]
+            logger.warning(f"Failed to sync preferences for users: {failed_users}")
+
+    except Exception as e:
+        logger.error(f"Error during preference synchronization: {e}")
+        import traceback
+
+        logger.error(f"Traceback: {traceback.format_exc()}")
